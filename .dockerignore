@@ -1,0 +1,24 @@
+# --- secrets & runtime state: never ship into an image layer -------------
+.env
+.env.*
+!.env.example
+data/
+storage-root/
+*.sqlite
+*.sqlite-journal
+*.log
+build.log
+
+# --- vcs / editor --------------------------------------------------------
+.git
+.gitignore
+.github
+.idea
+.vscode
+*.swp
+.DS_Store
+
+# --- build artefacts -----------------------------------------------------
+vendor/
+ws-server/node_modules/
+ws-server/npm-debug.log*

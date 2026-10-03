@@ -1,0 +1,36 @@
+{
+    "name": "ansnew/ansnew",
+    "description": "ANSNEW CLOUD — self-hosted, Dockerized, desktop-style file manager with local and remote storage adapters.",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.2",
+        "ext-pdo": "*",
+        "ext-json": "*",
+        "ext-fileinfo": "*",
+        "ext-session": "*",
+        "ext-openssl": "*",
+        "ext-mbstring": "*",
+        "ext-zip": "*",
+        "ext-phar": "*",
+        "phpseclib/phpseclib": "^3.0"
+    },
+    "suggest": {
+        "ext-ftp": "FTP / FTPS storage adapters (enabled in the bundled image)",
+        "ext-pdo_mysql": "MariaDB/MySQL backend instead of the default SQLite"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/App/"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "optimize-autoloader": true,
+        "allow-plugins": {
+            "php-http/discovery": false
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

@@ -1,0 +1,391 @@
+/* ANSNEW CLOUD design system — dark/light via CSS custom properties.
+ *
+ * BREAKPOINTS (CSS custom properties can't be used inside @media, so these four
+ * values are the contract — use them consistently, never ad-hoc numbers):
+ *   1200px  --compact   topbar starts shedding labels
+ *   1024px  --narrow    sidebar narrows; list drops the Owner column
+ *   900px   --drawer    sidebar becomes an overlay drawer + hamburger appears;
+ *                       secondary topbar actions move into the overflow menu
+ *   560px   --phone     dialogs become bottom sheets; tables scroll
+ */
+:root, [data-theme="dark"] {
+  --bg: #0f1216; --bg2: #161b22; --bg3: #1d232c; --panel: #171c24;
+  --border: #2a313c; --border2: #39414e;
+  --text: #e6e9ee; --text2: #9aa3b2; --text3: #6b7686;
+  --accent: #4f8cff; --accent2: #3a6fd8; --ok: #3fb26f; --warn: #e0a63c; --err: #e05656;
+  --sel: rgba(79,140,255,.18); --hover: rgba(255,255,255,.05);
+  --shadow: 0 8px 28px rgba(0,0,0,.45); --radius: 8px;
+}
+[data-theme="light"] {
+  --bg: #f4f6f9; --bg2: #ffffff; --bg3: #eef1f5; --panel: #ffffff;
+  --border: #d9dee6; --border2: #c3cbd6;
+  --text: #1c2430; --text2: #5a6474; --text3: #8b94a3;
+  --accent: #3574e0; --accent2: #2b5cba; --ok: #2e9e5b; --warn: #b97f14; --err: #cc4b4b;
+  --sel: rgba(53,116,224,.14); --hover: rgba(0,0,0,.045);
+  --shadow: 0 8px 28px rgba(20,30,50,.16);
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: var(--bg); color: var(--text);
+}
+#app { height: 100vh; display: flex; flex-direction: column; }
+button, input, select, textarea { font: inherit; color: inherit; }
+a { color: var(--accent); text-decoration: none; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- controls ---------- */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  cursor: pointer; white-space: nowrap; user-select: none;
+}
+.btn:hover { background: var(--hover); border-color: var(--border2); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent2); }
+.btn.danger { color: var(--err); }
+.btn.danger:hover { border-color: var(--err); }
+.btn:disabled, .btn.disabled { opacity: .5; cursor: not-allowed; }
+.btn.icon { padding: 6px 8px; }
+input[type=text], input[type=password], input[type=number], input[type=search], select, textarea {
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 6px 10px; outline: none; min-width: 0;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text2); }
+label.field > input, label.field > select, label.field > textarea { color: var(--text); font-size: 14px; }
+.checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+
+/* ---------- login ---------- */
+.login-wrap { flex: 1; display: grid; place-items: center; padding: 16px; background:
+  radial-gradient(1200px 500px at 20% -10%, rgba(79,140,255,.15), transparent), var(--bg); }
+.login-card {
+  width: min(360px, 100%); padding: 32px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 14px;
+}
+.login-card .logo { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 600; justify-content: center; margin-bottom: 6px; }
+.login-card .err { color: var(--err); font-size: 13px; min-height: 18px; }
+
+/* ---------- shell ---------- */
+.shell { flex: 1; display: flex; min-height: 0; }
+.sidebar {
+  width: 230px; flex-shrink: 0; background: var(--bg2); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow-y: auto; padding: 10px 8px; gap: 2px;
+  transition: transform .2s ease;
+}
+/* Backdrop for the overlay drawer (<=900px only; never rendered on desktop). */
+.scrim { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 940; }
+.scrim.show { display: block; }
+/* Visibility helpers driven by the breakpoint contract above. */
+.only-narrow { display: none !important; }
+.side-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px 12px; font-weight: 600; font-size: 15px; }
+.side-sec { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--text3); padding: 12px 8px 4px; }
+.side-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px;
+  cursor: pointer; color: var(--text2); border: none; background: none; text-align: left; width: 100%;
+}
+.side-item:hover { background: var(--hover); color: var(--text); }
+.side-item.active { background: var(--sel); color: var(--text); }
+.side-item .ico { width: 16px; height: 16px; flex-shrink: 0; }
+.side-item .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-item .usage-bar { height: 4px; background: var(--bg3); border-radius: 2px; margin-top: 3px; overflow: hidden; }
+.side-item .usage-bar > i { display: block; height: 100%; background: var(--accent); }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.topbar {
+  height: 46px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 0 12px;
+  border-bottom: 1px solid var(--border); background: var(--bg2); min-width: 0;
+}
+.topbar .spacer { flex: 1; min-width: 0; }
+/* Controls keep their size; the spacer absorbs the slack so nothing is clipped. */
+.topbar .btn, .topbar .avatar { flex-shrink: 0; }
+.avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+  display: grid; place-items: center; font-size: 12px; font-weight: 600; cursor: pointer; }
+.content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* ---------- tabs ---------- */
+.tabs { display: flex; align-items: flex-end; gap: 2px; padding: 6px 8px 0; background: var(--bg2); overflow-x: auto; }
+.tab {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--border);
+  border-bottom: none; border-radius: 8px 8px 0 0; background: var(--bg3); cursor: pointer; max-width: 220px;
+  color: var(--text2); font-size: 13px;
+}
+.tab.active { background: var(--bg); color: var(--text); border-color: var(--border2); }
+.tab .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .x { opacity: .6; padding: 0 2px; border-radius: 4px; }
+.tab .x:hover { opacity: 1; background: var(--hover); }
+
+/* ---------- files view ---------- */
+.fm-toolbar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex-wrap: wrap; background: var(--bg2); }
+.fm-toolbar .search { width: 170px; flex-shrink: 0; }
+.crumbs { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 160px; overflow-x: auto; white-space: nowrap; }
+.crumbs .crumb { padding: 3px 7px; border-radius: 5px; cursor: pointer; color: var(--text2); background: none; border: none; }
+.crumbs .crumb:hover { background: var(--hover); color: var(--text); }
+.crumbs .crumb:last-child { color: var(--text); font-weight: 600; }
+.fm-split { flex: 1; display: flex; min-height: 0; }
+.pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.pane + .pane { border-left: 1px solid var(--border); }
+.pane-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--text2); font-size: 12.5px; }
+.filelist { flex: 1; overflow: auto; outline: none; position: relative; }
+.filelist.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 4px; padding: 8px; align-content: start; }
+.filelist.list { padding: 4px 6px; }
+
+/* grid items */
+.fitem { border-radius: 6px; cursor: pointer; user-select: none; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 6px; text-align: center; border: 1px solid transparent; }
+.fitem:hover { background: var(--hover); }
+.fitem.selected { background: var(--sel); border-color: var(--accent); }
+.fitem .ico { width: 42px; height: 42px; }
+.fitem .nm { font-size: 12.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: break-all; }
+
+/* list rows */
+.frow { display: flex; align-items: center; gap: 10px; padding: 5px 8px; border-radius: 6px; cursor: pointer; user-select: none; }
+.frow:hover { background: var(--hover); }
+.frow.selected { background: var(--sel); }
+.frow .ico { width: 18px; height: 18px; flex-shrink: 0; }
+.frow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frow .sz, .frow .mt, .frow .ow { color: var(--text2); font-size: 12px; flex-shrink: 0; }
+.frow .sz { width: 84px; text-align: right; }
+.frow .mt { width: 130px; }
+.frow .ow { width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.list-head { display: flex; gap: 10px; padding: 4px 8px; color: var(--text3); font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; position: sticky; top: 0; background: var(--bg); z-index: 2; }
+.list-head span { cursor: pointer; }
+.list-head .nm { flex: 1; padding-left: 28px; } /* clear the 18px icon + 10px gap in .frow */
+.list-head .sz { width: 84px; text-align: right; }
+.list-head .mt { width: 130px; }
+.list-head .ow { width: 120px; }
+
+.dropzone-active { outline: 2px dashed var(--accent); outline-offset: -4px; background: var(--sel); }
+.empty-hint { color: var(--text3); text-align: center; padding: 40px 0; }
+
+/* ---------- thumbnails ---------- */
+.fitem .thumb {
+  width: 100%; height: 78px; display: block;
+  object-fit: cover; border-radius: 6px; background: var(--bg3);
+}
+/* A failed thumbnail hides itself and the tile falls back to the name only. */
+.fitem .thumb.thumb-failed { display: none; }
+
+/* ---------- details panel ---------- */
+.details {
+  width: 300px; flex-shrink: 0; border-left: 1px solid var(--border);
+  background: var(--bg2); display: flex; flex-direction: column; overflow-y: auto;
+}
+.details[hidden] { display: none; }
+.details-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.details-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 10px; text-align: center; font-size: 13px; }
+.details-empty .ico { width: 28px; height: 28px; opacity: .6; }
+.details-head { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
+.details-head .details-ico { width: 60px; height: 60px; color: var(--text2); }
+.details-thumb { width: 100%; max-height: 180px; object-fit: contain; border-radius: 8px; background: var(--bg3); }
+.details-title { font-weight: 600; font-size: 14px; word-break: break-word; overflow-wrap: anywhere; }
+.details-rows { display: grid; grid-template-columns: 76px 1fr; gap: 5px 10px; margin: 0; font-size: 12.5px; }
+.details-rows dt { color: var(--text3); }
+.details-rows dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.details-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.details-actions .btn { font-size: 12.5px; padding: 5px 9px; }
+
+/* ---------- drag & drop ---------- */
+/* A folder row highlighted as a drop target for an internal move. */
+.frow.drop-target, .fitem.drop-target { background: var(--sel); outline: 2px dashed var(--accent); outline-offset: -2px; }
+.frow.dragging, .fitem.dragging { opacity: .45; }
+/* While a drag is in flight, make folders obviously droppable. */
+.pane.is-dragging .frow[data-path][data-dir="1"] { outline: 1px dashed var(--border2); outline-offset: -2px; }
+
+/* ---------- selection action bar ---------- */
+.selbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; border-top: 1px solid var(--border); background: var(--bg2);
+}
+.selbar[hidden] { display: none; }
+.selbar .sel-count { font-size: 12.5px; color: var(--text2); font-weight: 600; margin-right: 4px; }
+
+/* ---------- row hover actions ---------- */
+.row-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity .12s; }
+.frow:hover .row-actions, .frow:focus-within .row-actions, .frow.selected .row-actions { opacity: 1; }
+.btn.icon.sm { padding: 3px 5px; }
+.btn.icon.sm svg.icon { width: 15px; height: 15px; }
+/* No hover on touch devices — always show them there. */
+@media (hover: none) { .row-actions { opacity: 1; } }
+
+/* ---------- sort control ---------- */
+.fm-toolbar .sort-select { flex-shrink: 0; font-size: 12.5px; padding: 5px 8px; }
+
+/* ---------- loading skeleton ---------- */
+.skeleton-wrap { display: contents; }
+.skeleton { pointer-events: none; }
+.skeleton .sk-ico { width: 18px; height: 18px; border-radius: 4px; background: var(--bg3); flex-shrink: 0; }
+.skeleton .sk-line { height: 10px; border-radius: 5px; background: var(--bg3); flex: 1; }
+.filelist.grid .skeleton { flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; }
+.filelist.grid .skeleton .sk-ico { width: 42px; height: 42px; border-radius: 8px; }
+.filelist.grid .skeleton .sk-line { width: 70%; flex: none; }
+.skeleton .sk-ico, .skeleton .sk-line {
+  background-image: linear-gradient(90deg, var(--bg3) 0%, var(--border) 50%, var(--bg3) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.3s ease-in-out infinite;
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton .sk-ico, .skeleton .sk-line { animation: none; } }
+
+/* ---------- empty state ---------- */
+.empty-state { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 48px 20px; text-align: center; }
+.empty-state .empty-ico { width: 46px; height: 46px; color: var(--text3); opacity: .6; margin-bottom: 4px; }
+.empty-state .empty-title { font-weight: 600; }
+.empty-state .empty-sub { font-size: 13px; }
+.empty-state .empty-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; justify-content: center; }
+
+/* ---------- focus visibility ---------- */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.frow:focus-visible, .fitem:focus-visible { outline-offset: -2px; }
+
+/* ---------- context menu / dialogs / toasts ---------- */
+.ctxmenu { position: fixed; z-index: 1000; background: var(--panel); border: 1px solid var(--border2); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; min-width: 180px; }
+.ctxmenu button { display: flex; width: 100%; align-items: center; gap: 8px; padding: 6px 10px; background: none; border: none; border-radius: 5px; cursor: pointer; text-align: left; }
+.ctxmenu button:hover { background: var(--hover); }
+.ctxmenu button.danger { color: var(--err); }
+.ctxmenu .sep { height: 1px; background: var(--border); margin: 4px 6px; }
+.ctxmenu button:disabled { opacity: .4; cursor: default; }
+
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 900; display: grid; place-items: center; padding: 16px; overflow: auto; }
+/* min-width must never exceed the viewport: `min(380px, 100%)` keeps the old
+   comfortable width on desktop while still fitting a 320px phone. */
+.dialog { background: var(--panel); border: 1px solid var(--border2); border-radius: 12px; box-shadow: var(--shadow); width: fit-content; min-width: min(380px, 100%); max-width: min(640px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
+.dialog > header { padding: 14px 18px 8px; font-weight: 600; font-size: 15px; }
+.dialog > .body { padding: 4px 18px 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.dialog > footer { padding: 10px 18px 14px; display: flex; justify-content: flex-end; gap: 8px; }
+
+.toasts { position: fixed; right: 14px; bottom: 14px; z-index: 1200; display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
+.toast { background: var(--panel); border: 1px solid var(--border2); border-left: 3px solid var(--accent); border-radius: 8px; box-shadow: var(--shadow); padding: 10px 14px; font-size: 13px; }
+.toast.ok { border-left-color: var(--ok); }
+.toast.err { border-left-color: var(--err); }
+.toast.warn { border-left-color: var(--warn); }
+
+/* ---------- preview ---------- */
+.preview-overlay { position: fixed; inset: 0; z-index: 950; background: rgba(0,0,0,.82); display: flex; flex-direction: column; }
+.preview-bar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; color: #eee; }
+.preview-bar .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-body { flex: 1; min-height: 0; display: grid; place-items: center; overflow: auto; padding: 0 16px 16px; }
+.preview-body img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.preview-body video, .preview-body audio { max-width: 100%; }
+.preview-body pre { background: var(--panel); color: var(--text); padding: 16px; border-radius: 8px; max-width: 100%; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-all; font-size: 13px; }
+.preview-body .md { background: var(--panel); padding: 20px 26px; border-radius: 8px; max-width: 860px; width: 100%; overflow-wrap: anywhere; }
+.preview-body .md h1, .preview-body .md h2, .preview-body .md h3 { margin: .6em 0 .3em; }
+.preview-body object { width: 100%; height: 100%; }
+
+/* ---------- jobs drawer ---------- */
+.jobdrawer { position: fixed; right: 0; top: 0; bottom: 0; width: min(360px, 100vw); background: var(--panel); border-left: 1px solid var(--border2); box-shadow: var(--shadow); z-index: 850; display: flex; flex-direction: column; }
+.jobdrawer > header { display: flex; align-items: center; padding: 14px 16px; font-weight: 600; border-bottom: 1px solid var(--border); }
+.jobdrawer .jobs { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.jobcard { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.jobcard .row { display: flex; align-items: center; gap: 8px; }
+.jobcard .type { font-weight: 600; }
+.jobcard .st { margin-left: auto; font-size: 12px; color: var(--text2); }
+.jobcard .prog { height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
+.jobcard .prog > i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+.jobcard .msg { font-size: 12px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-running { color: var(--accent); } .st-done { color: var(--ok); } .st-error, .st-canceled { color: var(--err); }
+
+/* ---------- tables / admin ---------- */
+/* Admin tables scroll inside their own box instead of dragging the whole page
+   sideways on narrow screens. */
+.table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 560px; }
+.table th { text-align: left; color: var(--text3); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.table tr:hover td { background: var(--hover); }
+.table .actions { text-align: right; white-space: nowrap; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11.5px; background: var(--bg3); border: 1px solid var(--border); }
+.badge.ok { color: var(--ok); border-color: var(--ok); }
+.badge.off { color: var(--text3); }
+.admin-page { flex: 1; overflow: auto; padding: 18px 22px; }
+.admin-page h2 { margin: 0 0 14px; font-size: 18px; }
+.admin-toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+
+/* upload tray */
+.uploadtray { position: fixed; right: 14px; bottom: 60px; width: min(320px, calc(100vw - 28px)); max-height: 40vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; box-shadow: var(--shadow); z-index: 800; padding: 10px; }
+/* The jobs drawer (z-index 850) used to cover the tray (800). Shift the tray
+   clear of it instead, and let it collapse to just its header. */
+body.jobdrawer-open .uploadtray { right: calc(min(360px, 100vw) + 14px); }
+.uploadtray > .tray-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.uploadtray.collapsed .tray-body { display: none; }
+.uprow { margin-bottom: 8px; }
+.uprow .r { display: flex; gap: 8px; align-items: center; font-size: 12.5px; }
+.uprow .r .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.uprow .prog { height: 5px; background: var(--bg3); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.uprow .prog > i { display: block; height: 100%; background: var(--accent); transition: width .2s; }
+.uprow.err .prog > i { background: var(--err); }
+
+/* An <svg> with no intrinsic size defaults to 300x150, which wrecked the shell
+   layout, so every sprite icon needs an explicit size. The em-based default
+   scales with the surrounding font; the more specific .ico rules (16/18/42px)
+   defined above still win.
+   NOTE: scoped to `svg.icon` on purpose — buttons carry a `btn icon` class pair
+   and a bare `.icon` rule would override .btn's `inline-flex` display. */
+svg.icon {
+  fill: currentColor;
+  width: 1.15em; height: 1.15em;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: -0.18em;
+}
+.topbar svg.icon { width: 17px; height: 17px; }
+.side-head svg.icon { width: 20px; height: 20px; }
+.login-card .logo svg.icon { width: 26px; height: 26px; }
+.ctxmenu svg.icon { width: 16px; height: 16px; }
+.preview-bar svg.icon { width: 18px; height: 18px; }
+.kbd { border: 1px solid var(--border2); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11.5px; background: var(--bg3); }
+.muted { color: var(--text2); }
+.spin { animation: spin 1s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+/* ======================================================================
+   RESPONSIVE — mirrors the breakpoint contract documented at the top of
+   this file (1200 / 1024 / 900 / 560). Add rules here, not inline.
+   ====================================================================== */
+
+/* <=1200 --compact: shed topbar labels before anything is clipped */
+@media (max-width: 1200px) {
+  .topbar .btn .lbl { display: none; }
+  .topbar .btn { padding: 6px 8px; }
+}
+
+/* <=1024 --narrow: tighter sidebar, drop the Owner column */
+@media (max-width: 1024px) {
+  .sidebar { width: 200px; }
+  .frow .ow, .list-head .ow { display: none; }
+}
+
+/* <=900 --drawer: sidebar becomes an overlay drawer behind a hamburger */
+@media (max-width: 900px) {
+  .only-narrow { display: inline-flex !important; }
+  .only-wide { display: none !important; }
+  .sidebar {
+    position: fixed; top: 0; bottom: 0; left: 0; width: 264px; z-index: 945;
+    transform: translateX(-100%); box-shadow: var(--shadow);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .side-item { min-height: 44px; }              /* comfortable touch targets */
+  .frow { min-height: 44px; }
+  .btn.icon { min-width: 40px; min-height: 40px; justify-content: center; }
+  .fm-toolbar .search { width: 100% !important; }  /* search gets its own row */
+  .crumbs { min-width: 0; }
+  .details { display: none; }                   /* shown as a sheet instead */
+  .jobdrawer { width: 100vw; }
+  body.jobdrawer-open .uploadtray { right: 14px; }
+  .uploadtray { width: calc(100vw - 28px); }
+  .toasts { left: 14px; right: 14px; max-width: none; }
+}
+
+/* <=560 --phone: dialogs become bottom sheets */
+@media (max-width: 560px) {
+  .overlay { align-items: end; padding: 0; }
+  .dialog {
+    width: 100vw; max-width: 100vw; min-width: 0; max-height: 92vh;
+    border-radius: 16px 16px 0 0; border-bottom: none;
+  }
+  .admin-page { padding: 14px; }
+  .tabs { padding: 4px 6px 0; }
+  .tab { max-width: 150px; }
+  .preview-bar { padding: 8px 12px; }
+  .preview-body { padding: 0 8px 8px; }
+}
