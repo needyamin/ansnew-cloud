@@ -29,8 +29,15 @@ final class Validator
 
     public static function password(string $v): void
     {
-        if (strlen($v) < 10) {
-            throw new InvalidArgumentException('Password must be at least 10 characters');
+        // The floor is configurable so local/dev deployments can bootstrap a
+        // throwaway account (e.g. admin/admin). Unset, it stays at the safe
+        // default of 10 — see PASSWORD_MIN_LENGTH in .env.example.
+        $min = \App\Config\Config::i()->getInt('PASSWORD_MIN_LENGTH', 10);
+        if ($min < 1 || $min > 4096) {
+            $min = 10;
+        }
+        if (strlen($v) < $min) {
+            throw new InvalidArgumentException("Password must be at least {$min} characters");
         }
         if (strlen($v) > 4096) {
             throw new InvalidArgumentException('Password too long');

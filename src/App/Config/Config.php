@@ -47,6 +47,9 @@ final class Config
             }
         }
 
+        // Every key read through Config::get()/getInt()/getBool() MUST be listed
+        // here — $this->values is populated only from this list, so an unlisted
+        // key silently reads as '' and falls back to its default.
         foreach ([
             'APP_URL', 'APP_ENV', 'DB_DRIVER', 'DB_DATABASE', 'DB_HOST', 'DB_PORT',
             'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'SESSION_LIFETIME', 'IDLE_TIMEOUT',
@@ -54,6 +57,13 @@ final class Config
             'RATE_LIMIT_WINDOW', 'LOGIN_MAX_ATTEMPTS', 'LOGIN_LOCKOUT_BASE',
             'LOGIN_LOCKOUT_MAX', 'TRASH_ENABLED', 'TRASH_RETENTION_DAYS',
             'SSRF_ALLOW_PRIVATE', 'SSRF_ALLOWLIST', 'WS_INTERNAL_URL', 'SESSION_SECURE_COOKIE',
+            // Bootstrap admin (first boot only — see bin/console.php ansnew:bootstrap-admin).
+            'ADMIN_USER', 'ADMIN_PASSWORD', 'ADMIN_EMAIL',
+            // Master keys / shared secret.
+            'APP_KEY', 'ANSNEW_FILE_KEY', 'ANSNEW_FILE_KEY_ID', 'WS_SECRET',
+            // Storage + encryption behaviour.
+            'DEFAULT_MOUNT_PATH', 'DEFAULT_MOUNT_LABEL', 'ANSNEW_ENCRYPT_LOCAL',
+            'ANSNEW_DATA_DIR', 'ANSNEW_STORAGE_ROOT', 'PASSWORD_MIN_LENGTH',
         ] as $key) {
             $val = getenv($key);
             if ($val !== false) {

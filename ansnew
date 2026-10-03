@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# ANSNEW CLOUD console wrapper.
+#
+# Why this exists: on Windows, Git Bash rewrites absolute arguments that look
+# like Unix paths. Running
+#
+#     docker compose exec php php /var/www/app/bin/console.php ansnew:crypto-status
+#
+# becomes  php C:/Program Files/Git/var/www/app/bin/console.php  before Docker
+# ever sees it, and you get "Could not open input file". The image's WORKDIR is
+# /var/www/app, so a relative path avoids the rewrite entirely.
+#
+# Usage:
+#   ./ansnew                       # list commands
+#   ./ansnew crypto-status --scan  # the "ansnew:" prefix is optional
+#   ./ansnew reset-password
+#   ./ansnew encrypt-existing --dry-run
+#   ./ansnew migrate
+#
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+if ! docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -qx php; then
+    echo "ansnew: the 'php' service is not running. Start it with: docker compose up -d" >&2
+    exit 1
+fi
+
+# No command, or a help flag: show the command list.
+case "${1:-}" in
+    ""|help|--help|-h)
+        exec docker compose exec php php bin/console.php
+        ;;
+esac
+
+# Accept the short form too: `./ansnew migrate` -> `ansnew:migrate`.
+if [[ "$1" == *:* ]]; then
+    exec docker compose exec php php bin/console.php "$@"
+fi
+
+first="$1"; shift
+exec docker compose exec php php bin/console.php "ansnew:${first}" "$@"

@@ -64,6 +64,12 @@ RUN chmod +x /entrypoint.sh \
     && mkdir -p /var/www/data /srv/storage/local \
     && chown -R www-data:www-data /var/www/data /srv/storage
 
+# Run from the application root. This matters beyond tidiness: `docker compose
+# exec php php bin/console.php ...` then works with a RELATIVE path, which Git
+# Bash on Windows does not rewrite. An absolute /var/www/app/... argument gets
+# mangled into C:/Program Files/Git/var/www/app/... before Docker sees it.
+WORKDIR /var/www/app
+
 # PHP-FPM (unprivileged: www-data) listens on 9000
 USER www-data
 EXPOSE 9000
