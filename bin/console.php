@@ -102,10 +102,12 @@ function resetPassword(array $argv): void
     echo "[ansnew] password updated for '{$row['username']}'\n";
     if (!$explicit) {
         echo "[ansnew] new password (store it now): {$password}\n";
-    } elseif (strlen($password) < 10) {
-        echo "[ansnew] note: passwords must be at least 10 characters\n";
     } else {
         echo "[ansnew] note: --password puts the secret in your shell history; prefer the random form\n";
+    }
+    $min = Config::i()->getInt('PASSWORD_MIN_LENGTH', 10);
+    if (strlen($password) < $min) {
+        echo "[ansnew] warning: password is shorter than the configured minimum ({$min} characters)\n";
     }
 }
 

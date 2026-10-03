@@ -59,7 +59,7 @@ docker compose logs php | grep -i "admin credential"
 # generate a new random password and print it
 docker compose exec php php /var/www/app/bin/console.php ansnew:reset-password
 
-# or set a specific one (min 10 characters) — note this lands in your shell history
+# or set a specific one (min PASSWORD_MIN_LENGTH, default 10) — lands in your shell history
 docker compose exec php php /var/www/app/bin/console.php ansnew:reset-password --password=my-new-password
 
 # target a different account
@@ -81,6 +81,7 @@ All settings live in `.env`. The ones that matter most:
 | `APP_URL` | `http://localhost:8080` | Canonical URL; used for same-origin checks |
 | `STORAGE_HOST_PATH` | `./storage-root` | Host directory bind-mounted as the default local mount |
 | `ADMIN_USER` / `ADMIN_PASSWORD` / `ADMIN_EMAIL` | `admin` / *(random)* / — | Bootstrap account (see above) |
+| `PASSWORD_MIN_LENGTH` | `10` | Minimum password length. Lower it only on a throwaway local box (delete the line for production) |
 | `DB_DRIVER` | `sqlite` | `sqlite` or `mysql` (needs `--profile mysql`) |
 | `UPLOAD_MAX_BYTES` | `2147483648` | Per-file upload cap (2 GiB) |
 | `ANSNEW_ENCRYPT_LOCAL` | `1` | Encrypt file contents on local mounts |
