@@ -6,6 +6,7 @@ namespace App\Jobs;
 
 use App\Jobs\JobHandler;
 use App\Services\JobService;
+use App\Services\NotifyService;
 
 /**
  * CLI worker: claims queued jobs and executes them.
@@ -49,6 +50,9 @@ final class Worker
             $result = JobHandler::run($type, $params, $id);
             JobService::finish($id, $result);
             error_log('[ansnew] job done ' . $type . ' ' . $id);
+            // Terminal state (success or failure) is the moment the directory
+            // listing actually changed — tell open panes to revalidate.
+            $this->notifyChange($job, $type, $params);
         } catch (\Throwable $e) {
             $msg = $e->getMessage();
             if ($msg === 'Job canceled') {
@@ -58,6 +62,18 @@ final class Worker
                 JobService::fail($id, $msg);
                 error_log('[ansnew] job error ' . $id . ': ' . $msg);
             }
+            // A canceled or failed job may still have changed things part-way.
+            $this->notifyChange($job, $type, $params);
+        }
+    }
+
+    /** @param array<string,mixed> $job @param array<string,mixed> $params */
+    private function notifyChange(array $job, string $type, array $params): void
+    {
+        try {
+            JobService::notifyFsChange((int) $job['user_id'], $type, $params);
+        } catch (\Throwable $e) {
+            // Never let a notification problem fail an otherwise good job.
         }
     }
 }

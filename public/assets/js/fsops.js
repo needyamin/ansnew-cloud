@@ -1,43 +1,92 @@
 'use strict';
 /* File operations: mkdir, rename, delete, copy/move (clipboard), archive, extract, favorites, trash helpers. */
-import { api } from './api.js';
-import { state } from './state.js';
+import { api, listKey, invalidate, invalidateList } from './api.js';
 import { toast, toastOk, toastErr } from './ui.js';
 
-export async function fsList(mount, path) {
-  return await api.get(`/api/fs/${encodeURIComponent(mount)}/list?path=${encodeURIComponent(path)}`);
+export { listKey };
+
+/**
+ * Directory listing. Cached briefly and revalidated with an ETag, so re-entering
+ * a folder (or refreshing after a mutation) is usually a 304 instead of a full
+ * directory walk. Pass {signal} to opt out of request sharing.
+ */
+export async function fsList(mount, path, opts = {}) {
+  return await api.get(
+    `/api/fs/${encodeURIComponent(mount)}/list?path=${encodeURIComponent(path)}`,
+    { cacheKey: listKey(mount, path), ttl: 15000, stale: 300000, ...opts },
+  );
+}
+
+/** Containing directory of a virtual path. */
+export function dirOf(path) {
+  const s = String(path || '/');
+  const i = s.lastIndexOf('/');
+  return i <= 0 ? '/' : s.slice(0, i);
+}
+
+/**
+ * Drop cached listings that a mutation at `path` can have changed: its parent
+ * directory, and — since `path` may be a directory — its whole subtree.
+ */
+export function invalidatePath(mount, path) {
+  invalidateList(mount, dirOf(path));
+  invalidateList(mount, path);
 }
 
 export async function fsMkdir(mount, path, name) {
-  return await api.post(`/api/fs/${encodeURIComponent(mount)}/mkdir`, { path, name });
+  const r = await api.post(`/api/fs/${encodeURIComponent(mount)}/mkdir`, { path, name });
+  invalidateList(mount, path);
+  return r;
 }
 
 export async function fsCreateFile(mount, path, name) {
-  return await api.post(`/api/fs/${encodeURIComponent(mount)}/file`, { path, name });
+  const r = await api.post(`/api/fs/${encodeURIComponent(mount)}/file`, { path, name });
+  invalidateList(mount, path);
+  return r;
 }
 
 export async function fsRename(mount, path, name) {
-  return await api.post(`/api/fs/${encodeURIComponent(mount)}/rename`, { path, name });
+  const r = await api.post(`/api/fs/${encodeURIComponent(mount)}/rename`, { path, name });
+  invalidatePath(mount, path);
+  if (r && r.path) invalidateList(mount, dirOf(r.path));
+  return r;
 }
 
-export async function fsDelete(mount, path, permanent = false) {
-  return await api.post(`/api/fs/${encodeURIComponent(mount)}/delete`, { path, permanent });
+/* ------------------------------------------------------------------ batch
+ * One request for a whole selection. Each returns
+ * { done: [...], async: [{path, job}], failed: [{path, error}], skipped: [...] }
+ * so a single bad path can't abort the rest.
+ */
+
+export async function fsDeleteBatch(mount, items, permanent = false) {
+  const r = await api.post(`/api/fs/${encodeURIComponent(mount)}/delete-batch`, { items, permanent });
+  for (const it of items) invalidatePath(mount, it.path);
+  return r;
 }
 
-export async function fsCopy(mount, path, destDir, destMount, conflict = 'rename') {
-  return await api.post(`/api/fs/${encodeURIComponent(mount)}/copy`, { path, destDir, destMount, conflict });
+export async function fsMoveBatch(mount, items, destDir, destMount, conflict = 'rename') {
+  const r = await api.post(`/api/fs/${encodeURIComponent(mount)}/move-batch`, { items, destDir, destMount, conflict });
+  for (const it of items) invalidatePath(mount, it.path);
+  invalidateList(destMount || mount, destDir);
+  return r;
 }
 
-export async function fsMove(mount, path, destDir, destMount, conflict = 'rename') {
-  return await api.post(`/api/fs/${encodeURIComponent(mount)}/move`, { path, destDir, destMount, conflict });
+export async function fsCopyBatch(mount, items, destDir, destMount, conflict = 'rename') {
+  const r = await api.post(`/api/fs/${encodeURIComponent(mount)}/copy-batch`, { items, destDir, destMount, conflict });
+  invalidateList(destMount || mount, destDir);
+  return r;
 }
 
 export async function fsArchive(mount, paths, destDir, name, format = 'zip') {
-  return await api.post(`/api/fs/${encodeURIComponent(mount)}/archive`, { paths, destDir, name, format });
+  const r = await api.post(`/api/fs/${encodeURIComponent(mount)}/archive`, { paths, destDir, name, format });
+  invalidateList(mount, destDir);
+  return r;
 }
 
 export async function fsExtract(mount, path, destDir) {
-  return await api.post(`/api/fs/${encodeURIComponent(mount)}/extract`, { path, destDir });
+  const r = await api.post(`/api/fs/${encodeURIComponent(mount)}/extract`, { path, destDir });
+  invalidateList(mount, destDir || dirOf(path));
+  return r;
 }
 
 export function downloadUrl(mount, path) {
@@ -67,34 +116,19 @@ export async function consumeDownloadToken(token) {
   a.remove();
 }
 
-export async function pasteItems(destMount, destDir) {
-  const cb = state.clipboard;
-  if (!cb || !cb.items.length) return;
-  let ok = 0, fail = 0;
-  for (const it of cb.items) {
-    try {
-      if (cb.mode === 'copy') await fsCopy(it.mount, it.path, destDir, destMount);
-      else await fsMove(it.mount, it.path, destDir, destMount);
-      ok++;
-    } catch (e) {
-      fail++;
-      toastErr(it.name + ': ' + e.message);
-    }
-  }
-  if (cb.mode === 'cut' && ok) state.clipboard = null;
-  if (ok) toastOk(`${cb.mode === 'copy' ? 'Copied' : 'Moved'} ${ok} item(s)${fail ? `, ${fail} failed` : ''}`);
-  return { ok, fail };
-}
-
 export async function toggleFavorite(mount, path, label) {
-  const { favorites } = await api.get('/api/favorites');
+  // Already loaded by refreshSidebarData() — no need for the extra round trip
+  // this used to make just to decide which way to toggle.
+  const { favorites } = await api.get('/api/favorites', { cacheKey: 'favorites', ttl: 30000 });
   const exists = (favorites || []).some(f => f.mount === mount && f.path === path);
   if (exists) {
     await api.delete('/api/favorites', { mount, path });
+    invalidate('favorites');
     toastOk('Removed from favorites');
     return false;
   }
   await api.post('/api/favorites', { mount, path, label });
+  invalidate('favorites');
   toastOk('Added to favorites');
   return true;
 }
@@ -102,12 +136,19 @@ export async function toggleFavorite(mount, path, label) {
 export async function trashList(mount) {
   return (await api.get(`/api/trash/${encodeURIComponent(mount)}`)).items;
 }
+/** Trash ops restore to an unknown original location, so drop the whole mount. */
 export async function trashRestore(mount, id) {
-  return await api.post(`/api/trash/${encodeURIComponent(mount)}/restore`, { id });
+  const r = await api.post(`/api/trash/${encodeURIComponent(mount)}/restore`, { id });
+  invalidateList(mount, '/');
+  return r;
 }
 export async function trashPurge(mount, id) {
-  return await api.post(`/api/trash/${encodeURIComponent(mount)}/purge`, { id });
+  const r = await api.post(`/api/trash/${encodeURIComponent(mount)}/purge`, { id });
+  invalidateList(mount, '/');
+  return r;
 }
 export async function trashEmpty(mount) {
-  return await api.post(`/api/trash/${encodeURIComponent(mount)}/empty`, {});
+  const r = await api.post(`/api/trash/${encodeURIComponent(mount)}/empty`, {});
+  invalidateList(mount, '/');
+  return r;
 }

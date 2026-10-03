@@ -75,5 +75,43 @@ for (const file of files) {
   }
 }
 
+/*
+ * Second pass: catch the inverse mistake — using a sibling module's export
+ * WITHOUT importing it. That is a ReferenceError at runtime, but it hides
+ * inside try/catch blocks so nothing surfaces until a feature silently stops
+ * working (e.g. a mutation that never refreshes because the cache-invalidation
+ * call threw first).
+ *
+ * Only names that some sibling module actually exports are considered, and
+ * names declared locally in the file are skipped, so false positives are rare.
+ */
+const allExports = new Map(); // name -> file that exports it
+for (const f of files) {
+  for (const n of exportsFor(f)) if (!allExports.has(n)) allExports.set(n, f);
+}
+
+for (const file of files) {
+  const src = readFileSync(join(DIR, file), 'utf8');
+  const imported = new Set(importsOf(src).flatMap((i) => i.names));
+  const own = exportsFor(file);
+  for (const [name, from] of allExports) {
+    if (from === file || imported.has(name) || own.has(name)) continue;
+    // Declared locally under the same name? then it shadows legitimately.
+    const declared = new RegExp(
+      `\\b(?:function|class|const|let|var)\\s+${name}\\b`      // declaration
+      + `|\\b${name}\\s*[:=]\\s*(?:async\\s*)?(?:function|\\()` // assignment
+      + `|^\\s*(?:async\\s+)?${name}\\s*\\([^)]*\\)\\s*\\{`     // class/object method (must open a body)
+      + `|[{,]\\s*${name}\\s*[,}:]`,                            // destructured binding
+      'm',
+    ).test(src);
+    if (declared) continue;
+    // Only flag bare calls: `clear(` yes, `node.clear(` / `foo.clear =` no.
+    // Method calls and property access are the dominant false-positive source.
+    if (!new RegExp(`(?<![.\\w$])${name}\\s*\\(`).test(src)) continue;
+    console.log(`UNIMPORTED EXPORT USED: ${file} uses '${name}' (exported by ${from}) without importing it`);
+    problems++;
+  }
+}
+
 if (problems) { console.log(`\n${problems} problem(s) found.`); process.exit(1); }
 console.log(`OK: ${checked} named imports across ${files.length} modules all resolve.`);

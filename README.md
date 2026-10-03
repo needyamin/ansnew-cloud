@@ -203,7 +203,21 @@ ANSNEW_PW=... bash tools/integrity-test.sh      # upload/download/archive/trash 
 ANSNEW_PW=... node tools/ws-test.mjs            # WebSocket ticket + hello frame
 ANSNEW_PW=... node tools/ui-test.mjs            # headless-Chrome UI smoke
 ANSNEW_PW=... node tools/ui-diagnose.mjs        # layout geometry probe
+
+# Frontend behaviour (all self-contained; they create and remove their own fixtures)
+ANSNEW_PW=... node tools/perf-smoke.mjs         # list windowing, scroll, selection, no-flicker refresh
+ANSNEW_PW=... node tools/optimistic-smoke.mjs   # instant rows, batch ops, rollback, uploads, no reloads
+ANSNEW_PW=... node tools/realtime-test.mjs      # fs.changed events for every mutation type
 ```
+
+`optimistic-smoke.mjs` and `realtime-test.mjs` are the regression guards for the
+"no page refreshes, immediate feedback" behaviour; `perf-smoke.mjs` asserts the
+DOM node count stays bounded on a 1 500-entry folder.
+
+> Note: some containerised environments never deliver WebSocket frames to page
+> scripts, so `optimistic-smoke.mjs` probes for that and skips its realtime
+> assertions rather than failing. `realtime-test.mjs` covers the same ground
+> from Node and works everywhere.
 
 ---
 

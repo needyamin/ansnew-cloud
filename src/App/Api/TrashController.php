@@ -9,6 +9,7 @@ use App\Auth\SessionManager;
 use App\Core\Request;
 use App\Core\Response;
 use App\Services\JobService;
+use App\Services\NotifyService;
 use App\Services\TrashService;
 
 final class TrashController
@@ -24,6 +25,9 @@ final class TrashController
         $user = Guard::requireUser($session);
         $body = $req->json();
         $r = TrashService::restore($user->id, (int) ($body['id'] ?? 0));
+        // The original location is only known after the fact, so invalidate the
+        // whole mount rather than guessing a directory.
+        NotifyService::fsChanged($user->id, [$mount => ['/']], 'trash-restore');
         return Response::ok($r);
     }
 
@@ -32,6 +36,7 @@ final class TrashController
         $user = Guard::requireUser($session);
         $body = $req->json();
         TrashService::purge($user->id, (int) ($body['id'] ?? 0));
+        NotifyService::fsChanged($user->id, [$mount => ['/']], 'trash-purge');
         return Response::ok(['purged' => true]);
     }
 
@@ -39,6 +44,7 @@ final class TrashController
     {
         $user = Guard::requireUser($session);
         $count = TrashService::emptyForUser($user->id, $mount);
+        NotifyService::fsChanged($user->id, [$mount => ['/']], 'trash-empty');
         return Response::ok(['purged' => $count]);
     }
 }

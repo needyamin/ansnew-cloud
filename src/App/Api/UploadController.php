@@ -11,6 +11,7 @@ use App\Core\Response;
 use App\Services\JobService;
 use App\Services\AuditService;
 use App\Services\FavoritesService;
+use App\Services\NotifyService;
 use App\Services\UploadService;
 use App\Support\PathGuard;
 use RuntimeException;
@@ -27,6 +28,7 @@ final class UploadController
         $conflict = (string) $req->input('conflict', 'rename');
         $results = UploadService::handleUploadedFiles($user, $mount, $path, $req->files(), $conflict);
         AuditService::log($user, 'fs.upload', $mount, $path, null, 'ok', count($results) . ' file(s)', $req->ip(), $req->userAgent());
+        NotifyService::fsChanged($user->id, [$mount => [$path]], 'upload');
         return Response::ok(['files' => $results]);
     }
 
@@ -44,6 +46,7 @@ final class UploadController
         $body = $req->json();
         $r = UploadService::complete($user, $mount, $body);
         AuditService::log($user, 'fs.upload.chunked', $mount, $r['path'] ?? null, null, 'ok', '', $req->ip(), $req->userAgent());
+        NotifyService::fsChanged($user->id, [$mount => [(string) ($body['path'] ?? '/')]], 'upload');
         return Response::ok($r);
     }
 }

@@ -30,6 +30,10 @@ final class Routes
         $r->post('/api/fs/{mount}/copy', fn($req, $m) => FsController::copy($req, $session, $m));
         $r->post('/api/fs/{mount}/move', fn($req, $m) => FsController::move($req, $session, $m));
         $r->post('/api/fs/{mount}/delete', fn($req, $m) => FsController::delete($req, $session, $m));
+        // Batch variants: one round trip for a whole selection instead of one per item.
+        $r->post('/api/fs/{mount}/delete-batch', fn($req, $m) => FsController::deleteBatch($req, $session, $m));
+        $r->post('/api/fs/{mount}/move-batch', fn($req, $m) => FsController::moveBatch($req, $session, $m));
+        $r->post('/api/fs/{mount}/copy-batch', fn($req, $m) => FsController::copyBatch($req, $session, $m));
         $r->post('/api/fs/{mount}/archive', fn($req, $m) => FsController::archive($req, $session, $m));
         $r->post('/api/fs/{mount}/extract', fn($req, $m) => FsController::extract($req, $session, $m));
         $r->get('/api/fs/{mount}/search', fn($req, $m) => FsController::search($req, $session, $m));

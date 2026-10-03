@@ -15,6 +15,7 @@ export const state = {
   activeTab: 0,
   clipboard: null,    // { mode: 'copy'|'cut', items: [{mount, path, name, isDir}] }
   pane2: null,        // second pane location { mount, path }
+  panes: new Set(),   // live FilesPane instances — lets WS events target open panes
 };
 
 export function saveSession(user, csrf) {

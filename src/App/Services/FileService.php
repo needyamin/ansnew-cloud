@@ -47,7 +47,30 @@ final class FileService
             'path' => $norm,
             'parent' => $norm === '/' ? null : PathGuard::dirname($norm),
             'entries' => $entries,
+            'etag' => self::fingerprint($entries),
         ];
+    }
+
+    /**
+     * Cheap content fingerprint for conditional GETs (ETag / If-None-Match).
+     *
+     * Deliberately computed from the *final* entry array — after encryption
+     * adapters have patched sizes and after the trash directory has been
+     * filtered — so the value is deterministic and changes exactly when the
+     * client-visible listing changes. One sha1 over ~4 fields per entry.
+     *
+     * @param array<int,array<string,mixed>> $entries
+     */
+    public static function fingerprint(array $entries): string
+    {
+        $parts = [];
+        foreach ($entries as $e) {
+            $parts[] = (string) ($e['name'] ?? '')
+                . "\0" . (string) ($e['type'] ?? '')
+                . "\0" . (string) ($e['size'] ?? '')
+                . "\0" . (string) ($e['mtime'] ?? '');
+        }
+        return hash('sha1', implode("\1", $parts));
     }
 
     public static function mkdir(AuthContext $user, string $mountName, string $path, string $name): array

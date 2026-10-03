@@ -7,20 +7,24 @@
  */
 
 import { el, clear, fmtSize } from './util.js';
-import { api, setCsrf } from './api.js';
+import { api, setCsrf, clearCache, invalidate } from './api.js';
 import { state, saveSession, setTheme } from './state.js';
 import { loadSprite, icon } from './icons.js';
 import { toast, toastOk, toastErr, toastWarn, dialog, confirmDialog, promptDialog } from './ui.js';
 import { FilesPane } from './filespane.js';
 import { DetailsPanel } from './details.js';
-import { initJobs, openJobs } from './jobs.js';
+import { initJobs, openJobs, closeJobs } from './jobs.js';
 import * as rt from './realtime.js';
 import {
-  fsMkdir, fsCreateFile, fsRename, fsDelete, fsArchive, fsExtract, fsMove,
+  fsMkdir, fsCreateFile, fsRename, fsArchive, fsExtract,
+  fsDeleteBatch, fsMoveBatch, fsCopyBatch,
   triggerDownload, downloadFolder, consumeDownloadToken,
-  pasteItems, toggleFavorite, trashList, trashRestore, trashPurge, trashEmpty,
+  toggleFavorite, trashList, trashRestore, trashPurge, trashEmpty,
 } from './fsops.js';
 import { runUploadsWithUI } from './uploadtray.js';
+import { abortAllUploads } from './upload.js';
+import { runOp, joinPath, dirOf, syntheticEntry, reportBatch, resolveJob } from './mutation.js';
+import { initFsWatch } from './fswatch.js';
 
 const root = document.getElementById('app');
 
@@ -32,6 +36,7 @@ let menuNode = null;      // open context menu
 let shellNodes = {};      // cached shell DOM refs
 let uploadInput = null;
 let watchTimers = new Map();
+let shellListenersBound = false;
 
 const isAdmin = () => state.user && state.user.role === 'admin';
 
@@ -117,9 +122,22 @@ function renderLogin() {
 function startApp() {
   initJobs();
   rt.on('job.progress', (d) => {
-    if (d && d.status === 'done' && d.type === 'download-folder') resolveDownloadToken(d.id);
-    if (d && (d.status === 'done' || d.status === 'error') && view === 'files' && pane) pane.refresh();
+    if (!d) return;
+    // The push now carries the job's result, so a finished download can be
+    // redeemed straight away instead of polling /api/jobs every 1.2s.
+    if (d.status === 'done' && d.type === 'download-folder') {
+      const token = d.result && d.result.token;
+      if (token) consumeDownloadToken(token);
+      else resolveDownloadToken(d.id);      // fallback for an older server
+    }
+    if (d.status === 'done' || d.status === 'error') {
+      // Hand the job back to whoever was tracking it, so only the rows it
+      // actually owns stop being dimmed.
+      resolveJob(d.id, d.status, d.message);
+      if (d.status === 'error' && d.message) toastErr('Background job failed: ' + d.message);
+    }
   });
+  initFsWatch();
   rt.connect();
   // Mounts/favorites/recent must exist before the sidebar can render, so load
   // them first and only then build the shell.
@@ -163,9 +181,14 @@ function renderShell() {
   ));
   root.appendChild(scrimNode);
 
-  window.addEventListener('resize', () => { closeMenu(); closeDrawer(); });
-  document.addEventListener('keydown', globalKeys);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+  // Bind document/window listeners once. Signing out no longer reloads the
+  // page, so without this guard each sign-in would stack another copy.
+  if (!shellListenersBound) {
+    shellListenersBound = true;
+    window.addEventListener('resize', () => { closeMenu(); closeDrawer(); });
+    document.addEventListener('keydown', globalKeys);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+  }
 
   if (!state.tabs.length && state.mounts.length) {
     state.tabs.push({ id: 't' + Date.now(), mount: state.mounts[0].name, path: '/', history: [], histIdx: -1 });
@@ -184,8 +207,13 @@ function buildSidebar() {
   // navigates — cheaper and less error-prone than patching every click handler.
   sb.addEventListener('click', (e) => { if (e.target.closest('.side-item')) closeDrawer(); });
 
+  // Mount buttons are tracked so the active highlight can be updated without
+  // rebuilding the whole sidebar.
+  const mountButtons = new Map();
+
   const render = () => {
     clear(sb);
+    mountButtons.clear();
     sb.appendChild(el('div', { class: 'side-head' }, icon('drive'), 'ANSNEW CLOUD'));
 
     sb.appendChild(el('div', { class: 'side-sec' }, 'Locations'));
@@ -198,12 +226,8 @@ function buildSidebar() {
         icon('drive', 'ico'),
         el('span', { class: 'lbl', text: m.label }),
       );
-      btn.addEventListener('click', () => {
-        const tab = currentTab();
-        if (tab) { tab.mount = m.name; tab.path = '/'; tab.history = []; tab.histIdx = -1; }
-        showView('files');
-        if (pane) pane.navigate(m.name, '/');
-      });
+      btn.addEventListener('click', () => navigateTo(m.name, '/'));
+      mountButtons.set(m.name, btn);
       sb.appendChild(btn);
     }
 
@@ -215,7 +239,7 @@ function buildSidebar() {
     for (const f of favs) {
       const btn = el('button', { class: 'side-item', title: f.mount + ':' + f.path },
         icon('star', 'ico'), el('span', { class: 'lbl', text: f.label || f.path }));
-      btn.addEventListener('click', () => { showView('files'); if (pane) pane.navigate(f.mount, f.path); });
+      btn.addEventListener('click', () => navigateTo(f.mount, f.path));
       sb.appendChild(btn);
     }
 
@@ -227,11 +251,7 @@ function buildSidebar() {
     for (const r of recent.slice(0, 6)) {
       const btn = el('button', { class: 'side-item', title: r.mount + ':' + r.path },
         icon('clock', 'ico'), el('span', { class: 'lbl', text: r.name || r.path }));
-      btn.addEventListener('click', () => {
-        const parent = r.path.replace(/\/[^/]*$/, '') || '/';
-        showView('files');
-        if (pane) pane.navigate(r.mount, parent);
-      });
+      btn.addEventListener('click', () => navigateTo(r.mount, r.path.replace(/\/[^/]*$/, '') || '/'));
       sb.appendChild(btn);
     }
 
@@ -255,8 +275,24 @@ function buildSidebar() {
   };
 
   sb.render = render;
+  /** Highlight a mount without rebuilding the sidebar. */
+  sb.setActive = (mountName) => {
+    for (const [name, btn] of mountButtons) btn.classList.toggle('active', name === mountName);
+  };
   render();
   return sb;
+}
+
+/**
+ * Jump the active tab to a location. Every sidebar entry used to call
+ * showView('files') — which built a brand-new pane and fetched the directory —
+ * and then immediately navigate it again, so one click cost two listings.
+ */
+function navigateTo(mount, path) {
+  const tab = currentTab();
+  if (tab) { tab.mount = mount; tab.path = path; tab.history = []; tab.histIdx = -1; }
+  if (view === 'files' && pane) { pane.navigate(mount, path); return; }
+  showView('files');   // builds a pane already pointed at tab.mount/tab.path
 }
 
 /* ----------------------------------------------------------------- topbar */
@@ -305,7 +341,8 @@ function buildTopbar() {
   const detailsBtn = mk('info', 'Toggle details panel', () => {
     state.detailsOpen = !state.detailsOpen;
     localStorage.setItem('ansnew.details', state.detailsOpen ? '1' : '0');
-    renderFiles();
+    // Just show/hide — rebuilding the panes here refetched both directories.
+    if (details) details.root.hidden = !state.detailsOpen;
   });
   tb.appendChild(wide(detailsBtn));
 
@@ -413,8 +450,8 @@ function showView(name) {
   if (name !== 'files' && shellNodes.tabsBar) shellNodes.tabsBar.style.display = 'none';
   if (name === 'files') { renderFiles(); return; }
   const c = shellNodes.content;
+  destroyPanes();
   clear(c);
-  pane = null; pane2 = null;
   if (name === 'trash') renderTrash(c);
   else if (name === 'admin-users') renderAdminUsers(c);
   else if (name === 'admin-mounts') renderAdminMounts(c);
@@ -422,8 +459,15 @@ function showView(name) {
   else if (name === 'admin-audit') renderAdminAudit(c);
 }
 
+/** Release both panes before the DOM they live in is thrown away. */
+function destroyPanes() {
+  if (pane) { pane.destroy(); pane = null; }
+  if (pane2) { pane2.destroy(); pane2 = null; }
+}
+
 function renderFiles() {
   const c = shellNodes.content;
+  destroyPanes();
   clear(c);
   renderTabs();
 
@@ -440,17 +484,13 @@ function renderFiles() {
 
   const split = el('div', { class: 'fm-split' });
   c.appendChild(split);
+  shellNodes.split = split;
 
   pane = new FilesPane({ mount: tab.mount, path: tab.path }, { compact: state.split });
   wirePane(pane, false);
   split.appendChild(pane.root);
 
-  if (state.split) {
-    const loc = state.pane2 || { mount: tab.mount, path: tab.path };
-    pane2 = new FilesPane(loc, { compact: true });
-    wirePane(pane2, true);
-    split.appendChild(pane2.root);
-  }
+  if (state.split) addSecondPane();
 
   // Metadata panel (hidden by CSS below 900px).
   details = new DetailsPanel({
@@ -501,21 +541,60 @@ function wirePane(p, secondary) {
   p.onUpload = (inst) => pickUpload(inst);
 }
 
+/** Create the secondary pane in place, keeping the details panel last. */
+function addSecondPane() {
+  const tab = currentTab();
+  const loc = state.pane2 || { mount: tab ? tab.mount : '', path: tab ? tab.path : '/' };
+  pane2 = new FilesPane(loc, { compact: true });
+  wirePane(pane2, true);
+  shellNodes.split.insertBefore(pane2.root, details ? details.root : null);
+}
+
+/**
+ * Toggle split view without tearing down the primary pane. The old version
+ * called renderFiles(), which destroyed BOTH panes and refetched both
+ * directories just to show or hide a second pane.
+ */
 function toggleSplit() {
   state.split = !state.split;
-  if (!state.split) state.pane2 = null;
-  renderFiles();
+  if (!state.split) {
+    if (pane2) { pane2.destroy(); pane2.root.remove(); pane2 = null; }
+    state.pane2 = null;
+  } else if (!pane2 && shellNodes.split) {
+    addSecondPane();
+  }
 }
 
 function updateSidebarActive() {
-  if (shellNodes.sidebar && shellNodes.sidebar.render) shellNodes.sidebar.render();
+  if (!shellNodes.sidebar) return;
+  // Only the highlighted location changes on selection — rebuilding the whole
+  // sidebar (mounts + favorites + recent + tools + admin) on every click was
+  // pure DOM churn.
+  if (shellNodes.sidebar.setActive) shellNodes.sidebar.setActive(view === 'files' && pane ? pane.loc.mount : null);
+  else if (shellNodes.sidebar.render) shellNodes.sidebar.render();
 }
 
-async function recordRecent(mount, path) {
+/**
+ * Record a location in the Recent list.
+ *
+ * Debounced and de-duplicated: this used to fire a POST on every single
+ * navigation, including the ones caused by breadcrumb clicks and tab switches.
+ */
+let recentTimer = null;
+let lastRecent = { key: '', at: 0 };
+
+function recordRecent(mount, path) {
   if (path === '/') return;
-  try {
-    await api.post('/api/recent', { mount, path, name: path.split('/').filter(Boolean).pop(), action: 'open' });
-  } catch (_) { /* non-critical */ }
+  const key = mount + ':' + path;
+  const now = Date.now();
+  if (key === lastRecent.key && now - lastRecent.at < 60000) return;
+  lastRecent = { key, at: now };
+  clearTimeout(recentTimer);
+  recentTimer = setTimeout(() => {
+    api.post('/api/recent', {
+      mount, path, name: path.split('/').filter(Boolean).pop(), action: 'open',
+    }).then(() => invalidate('recent')).catch(() => { /* non-critical */ });
+  }, 1500);
 }
 
 /* ------------------------------------------------------------ context menu */
@@ -606,23 +685,52 @@ async function newFolder(inst = pane) {
   if (!inst) return;
   const name = await promptDialog('Folder name', '', { title: 'New folder', okLabel: 'Create' });
   if (!name) return;
-  try { await fsMkdir(inst.loc.mount, inst.loc.path, name); toastOk('Folder created'); inst.refresh(); }
-  catch (e) { toastErr(e.message); }
+  const mount = inst.loc.mount;
+  const dir = inst.loc.path;
+  await runOp({
+    pane: inst,
+    // The row appears before the request is even sent.
+    patch: () => ({ add: [syntheticEntry(joinPath(dir, name), name, 'dir')] }),
+    call: () => fsMkdir(mount, dir, name),
+    invalidate: [[mount, dir]],
+    okMsg: 'Folder created',
+  });
 }
 
 async function newFile(inst = pane) {
   if (!inst) return;
   const name = await promptDialog('File name', '', { title: 'New file', okLabel: 'Create' });
   if (!name) return;
-  try { await fsCreateFile(inst.loc.mount, inst.loc.path, name); toastOk('File created'); inst.refresh(); }
-  catch (e) { toastErr(e.message); }
+  const mount = inst.loc.mount;
+  const dir = inst.loc.path;
+  await runOp({
+    pane: inst,
+    patch: () => ({ add: [syntheticEntry(joinPath(dir, name), name, 'file')] }),
+    call: () => fsCreateFile(mount, dir, name),
+    invalidate: [[mount, dir]],
+    okMsg: 'File created',
+  });
 }
 
 async function renameEntry(inst, entry) {
   const name = await promptDialog('New name', entry.name, { title: 'Rename', okLabel: 'Rename' });
   if (!name || name === entry.name) return;
-  try { await fsRename(inst.loc.mount, entry.path, name); toastOk('Renamed'); inst.refresh(); }
-  catch (e) { toastErr(e.message); }
+  const mount = inst.loc.mount;
+  const target = joinPath(dirOf(entry.path), name);
+  await runOp({
+    pane: inst,
+    patch: () => {
+      // Keep the selection on the row as it moves to its new name.
+      if (inst.selected.delete(entry.path)) inst.selected.add(target);
+      return {
+        remove: [entry.path],
+        add: [syntheticEntry(target, name, entry.type, entry.size)],
+      };
+    },
+    call: () => fsRename(mount, entry.path, name),
+    invalidate: [[mount, dirOf(entry.path)], [mount, inst.loc.path]],
+    okMsg: 'Renamed',
+  });
 }
 
 function renameSelection(inst) {
@@ -634,7 +742,7 @@ function renameSelection(inst) {
 function deleteSelection(inst) { deleteEntries(inst, inst.selectedEntries()); }
 
 async function deleteEntries(inst, entries) {
-  if (!entries.length) return;
+  if (!entries || !entries.length) return;
   const label = entries.length === 1 ? `"${entries[0].name}"` : `${entries.length} items`;
   const permanent = !inst.mountInfo || inst.mountInfo.trashEnabled === false;
   const ok = await confirmDialog(
@@ -642,13 +750,20 @@ async function deleteEntries(inst, entries) {
     { title: 'Delete', danger: permanent, okLabel: permanent ? 'Delete permanently' : 'Move to trash' },
   );
   if (!ok) return;
-  let done = 0, failed = 0;
-  for (const en of entries) {
-    try { await fsDelete(inst.loc.mount, en.path, permanent); done++; }
-    catch (e) { failed++; toastErr(en.name + ': ' + e.message); }
-  }
-  if (done) toastOk(`Deleted ${done} item(s)${failed ? `, ${failed} failed` : ''}`);
-  inst.refresh();
+
+  const mount = inst.loc.mount;
+  // Files vanish instantly. Folders are handled by a background job, so they
+  // stay visible (dimmed) until the worker confirms.
+  const files = entries.filter(e => e.type !== 'dir');
+  const res = await runOp({
+    pane: inst,
+    patch: () => ({ remove: files.map(e => e.path) }),
+    pending: entries.map(e => e.path),
+    call: () => fsDeleteBatch(mount, entries.map(e => ({ path: e.path })), permanent),
+    invalidate: [[mount, inst.loc.path]],
+  });
+  if (res) reportBatch(res, { verb: 'Deleted', openJobs });
+  if (res) inst.scheduleRevalidate(700);
 }
 
 /* ------------------------------------------- selection-bar / drag-drop actions */
@@ -677,18 +792,29 @@ function stageClipboard(inst, entries, mode) {
 /** Internal / cross-pane / cross-mount move — used by drag & drop. */
 async function movePaths(inst, paths, destMount, destDir, srcMount) {
   if (!paths || !paths.length) return;
-  let ok = 0, skipped = 0;
-  for (const p of paths) {
-    // Refuse dropping a folder into itself or its own descendant.
-    if (p === destDir || destDir === p || destDir.startsWith(p + '/')) { skipped++; continue; }
-    try {
-      const r = await fsMove(srcMount || inst.loc.mount, p, destDir, destMount);
-      if (r && r.async) { toast('Moving in the background…', 'info'); openJobs(); }
-      ok++;
-    } catch (e) { skipped++; toastErr(e.message); }
-  }
-  if (ok) toastOk(`Moved ${ok} item(s)${skipped ? `, ${skipped} skipped` : ''}`);
-  inst.refresh();
+  const mount = srcMount || inst.loc.mount;
+
+  // Refuse dropping a folder into itself or its own descendant (the server
+  // enforces this too, but catching it here avoids a pointless request).
+  const movable = paths.filter(p => !(p === destDir || destDir.startsWith(p + '/')));
+  const skipped = paths.length - movable.length;
+  if (!movable.length) { if (skipped) toastWarn('Cannot move a folder into itself'); return; }
+
+  // Same-mount moves into the directory on screen can be shown instantly;
+  // cross-mount or off-screen destinations are reconciled by the revalidate.
+  const sameDir = destMount === mount && destDir === inst.loc.path;
+  const entries = sameDir ? movable.map(p => inst.entryByPath(p)).filter(Boolean) : [];
+
+  const res = await runOp({
+    pane: inst,
+    patch: () => ({ remove: entries.map(e => e.path) }),
+    pending: movable,
+    call: () => fsMoveBatch(mount, movable.map(p => ({ path: p })), destDir, destMount),
+    invalidate: [[mount, inst.loc.path], [destMount, destDir]],
+  });
+  if (res) reportBatch(res, { verb: 'Moved', openJobs });
+  if (res && skipped) toastWarn(`${skipped} item(s) skipped`);
+  if (res) inst.scheduleRevalidate(700);
 }
 
 async function compress(inst, entries) {
@@ -711,9 +837,32 @@ async function extract(inst, entry) {
 }
 
 async function pasteInto(inst) {
-  if (!state.clipboard) return;
-  const r = await pasteItems(inst.loc.mount, inst.loc.path);
-  if (r && r.ok) inst.refresh();
+  const cb = state.clipboard;
+  if (!cb || !cb.items.length) return;
+  const mount = inst.loc.mount;
+  const dir = inst.loc.path;
+  const isCut = cb.mode === 'cut';
+
+  // A cut from the directory on screen can be reflected immediately; a copy
+  // (or a cut from elsewhere) is reconciled by the revalidate, because the
+  // destination name may be rewritten by conflict handling.
+  const localCut = isCut ? cb.items.filter(it => it.mount === mount && dirOf(it.path) === dir) : [];
+  const fromHere = localCut.map(it => it.path);
+
+  const res = await runOp({
+    pane: inst,
+    patch: () => ({ remove: fromHere }),
+    pending: cb.items.map(it => it.path),
+    call: () => (isCut
+      ? fsMoveBatch(mount, cb.items.map(it => ({ path: it.path, mount: it.mount })), dir, mount)
+      : fsCopyBatch(mount, cb.items.map(it => ({ path: it.path, mount: it.mount })), dir, mount)),
+    invalidate: [[mount, dir]],
+  });
+
+  if (!res) return;
+  reportBatch(res, { verb: isCut ? 'Moved' : 'Copied', openJobs });
+  if (isCut && (res.done || []).length) state.clipboard = null;
+  inst.scheduleRevalidate(700);
 }
 
 function pickUpload(inst = pane) {
@@ -726,7 +875,8 @@ function pickUpload(inst = pane) {
     const files = [...uploadInput.files];
     uploadInput.value = '';
     if (!files.length) return;
-    runUploadsWithUI(files, inst.loc.mount, inst.loc.path, 'rename', () => inst.refresh());
+    // Hand over the pane so the incoming files show up immediately.
+    runUploadsWithUI(files, inst.loc.mount, inst.loc.path, 'rename', inst);
   };
   uploadInput.click();
 }
@@ -1190,9 +1340,9 @@ async function renderAdminAudit(c) {
 async function refreshSidebarData() {
   try {
     const [m, f, r] = await Promise.all([
-      api.get('/api/mounts'),
-      api.get('/api/favorites'),
-      api.get('/api/recent?limit=8'),
+      api.get('/api/mounts', { cacheKey: 'mounts', ttl: 30000 }),
+      api.get('/api/favorites', { cacheKey: 'favorites', ttl: 30000 }),
+      api.get('/api/recent?limit=8', { cacheKey: 'recent', ttl: 30000 }),
     ]);
     state.mounts = m.mounts || [];
     state.favorites = f.favorites || [];
@@ -1248,7 +1398,12 @@ function changePassword(forced) {
         onClick: async () => {
           if (next.value.length < 8) { toastErr('New password must be at least 8 characters'); return false; }
           try {
-            await api.post('/api/auth/password', { current: cur.value, password: next.value });
+            // Field names must match AuthController::changePassword — this used
+            // to send {current, password}, so every change failed with 403.
+            await api.post('/api/auth/password', {
+              currentPassword: cur.value,
+              newPassword: next.value,
+            });
             toastOk('Password updated');
           } catch (e) { toastErr(e.message); return false; }
         },
@@ -1257,15 +1412,59 @@ function changePassword(forced) {
   });
 }
 
+/**
+ * Sign out without reloading the page.
+ *
+ * The old implementation called location.reload(), which threw away the whole
+ * SPA (and its warm module graph) just to show a login form again.
+ */
 async function logout() {
   try { await api.post('/api/auth/logout', {}); } catch (_) { /* ignore */ }
   rt.disconnect();
-  location.reload();
+  abortAllUploads();
+  closeJobs();
+  closeMenu();
+  closeDrawer();
+
+  // Drop everything belonging to the previous session.
+  clearCache();
+  destroyPanes();
+  details = null;
+  view = 'files';
+  menuNode = null;
+  shellNodes = {};
+  state.user = null;
+  state.csrf = '';
+  state.tabs = [];
+  state.activeTab = 0;
+  state.clipboard = null;
+  state.pane2 = null;
+  state.split = false;
+  state.mounts = [];
+  state.favorites = [];
+  state.recent = [];
+  setCsrf('');
+
+  renderLogin();
 }
 
+/**
+ * Fallback path for when a push arrives without the job's result.
+ *
+ * Previously this polled /api/jobs forever at 1.2 s intervals; now it is capped
+ * and stops as soon as the job reaches a terminal state. The normal path is the
+ * WebSocket push, which already carries the token.
+ */
 function resolveDownloadToken(jobId) {
   if (watchTimers.has(jobId)) return;
+  const MAX_ATTEMPTS = 12;
+  let attempts = 0;
   const t = setInterval(async () => {
+    if (++attempts > MAX_ATTEMPTS) {
+      clearInterval(t); watchTimers.delete(jobId);
+      toastErr('Download is taking longer than expected — check Background jobs.');
+      return;
+    }
     try {
       const { jobs } = await api.get('/api/jobs?limit=50');
       const j = jobs.find(x => x.id === jobId);
@@ -1274,11 +1473,12 @@ function resolveDownloadToken(jobId) {
       if (j.status === 'done' && j.result && j.result.token) consumeDownloadToken(j.result.token);
       else if (j.status === 'error') toastErr('Download failed: ' + (j.message || 'unknown error'));
     } catch (_) { clearInterval(t); watchTimers.delete(jobId); }
-  }, 1200);
+  }, 1500);
   watchTimers.set(jobId, t);
 }
 
 function globalKeys(e) {
+  if (!state.user) return;   // signed out: the shell is gone
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || '')) || e.target.isContentEditable;
   if (typing) return;
   if (e.key === 'Escape') { closeMenu(); return; }

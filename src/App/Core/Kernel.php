@@ -57,8 +57,20 @@ final class Kernel
                 }
 
                 // ---- rate limit (per user-or-IP) ----
-                $bucketKey = 'rl:' . ($this->session->get('user_id') ? (string) $this->session->get('user_id') : $request->ip());
-                if (!RateLimiter::allow($bucketKey, $cfg->getInt('RATE_LIMIT_REQUESTS', 240), $cfg->getInt('RATE_LIMIT_WINDOW', 60))) {
+                // Thumbnails are numerous but cheap. They used to share one
+                // bucket with everything else, so opening a folder of a few
+                // hundred images would trip the limiter and then degrade every
+                // other operation for a minute. They get a separate, larger
+                // bucket: asset loading can't starve real operations, and
+                // hammering assets can't buy extra quota for real operations.
+                $bucketId = $this->session->get('user_id') ? (string) $this->session->get('user_id') : $request->ip();
+                $isAsset = str_starts_with($request->path, '/api/fs/')
+                    && str_ends_with($request->path, '/thumb');
+                $bucketKey = 'rl:' . $bucketId . ($isAsset ? ':asset' : '');
+                $maxRequests = $isAsset
+                    ? $cfg->getInt('RATE_LIMIT_ASSET_REQUESTS', 1200)
+                    : $cfg->getInt('RATE_LIMIT_REQUESTS', 600);
+                if (!RateLimiter::allow($bucketKey, $maxRequests, $cfg->getInt('RATE_LIMIT_WINDOW', 60))) {
                     return $this->finish(Response::error('Too many requests', 429, 'rate_limited'), $commonHeaders);
                 }
 
@@ -97,11 +109,21 @@ final class Kernel
         }
     }
 
-    /** @param array<string,string> $headers */
+    /**
+     * Apply the common security headers *without* clobbering anything a
+     * controller set deliberately. Previously this overwrote Cache-Control
+     * unconditionally, which silently killed the cache headers on thumbnails,
+     * previews and (now) the conditional-GET ETag on directory listings.
+     *
+     * @param array<string,string> $headers
+     */
     private function finish(Response $response, array $headers): Response
     {
+        $existing = $response->headers();
         foreach ($headers as $k => $v) {
-            $response->withHeader($k, $v);
+            if (!array_key_exists(strtolower($k), $existing)) {
+                $response->withHeader($k, $v);
+            }
         }
         return $response;
     }

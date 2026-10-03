@@ -15,6 +15,9 @@
   --accent: #4f8cff; --accent2: #3a6fd8; --ok: #3fb26f; --warn: #e0a63c; --err: #e05656;
   --sel: rgba(79,140,255,.18); --hover: rgba(255,255,255,.05);
   --shadow: 0 8px 28px rgba(0,0,0,.45); --radius: 8px;
+  /* Grid tile geometry. Read by FilesPane.measure() to compute the column
+     count in JS, which is what allows the grid to be windowed. */
+  --tile-h: 120px; --tile-min: 110px; --tile-gap: 4px;
 }
 [data-theme="light"] {
   --bg: #f4f6f9; --bg2: #ffffff; --bg3: #eef1f5; --panel: #ffffff;
@@ -129,14 +132,21 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .pane + .pane { border-left: 1px solid var(--border); }
 .pane-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--text2); font-size: 12.5px; }
 .filelist { flex: 1; overflow: auto; outline: none; position: relative; }
-.filelist.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 4px; padding: 8px; align-content: start; }
+/* Both modes are block-level: rows/tiles are absolutely positioned inside
+   .fl-spacer by FilesPane, which is how the list stays windowed. */
+.filelist.grid { display: block; padding: 8px; }
 .filelist.list { padding: 4px 6px; }
+/* The virtual canvas: its height stands in for the whole listing. */
+.fl-spacer { position: relative; width: 100%; }
 
 /* grid items */
-.fitem { border-radius: 6px; cursor: pointer; user-select: none; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 6px; text-align: center; border: 1px solid transparent; }
+.fitem { border-radius: 6px; cursor: pointer; user-select: none; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 6px; text-align: center; border: 1px solid transparent; height: var(--tile-h); }
 .fitem:hover { background: var(--hover); }
 .fitem.selected { background: var(--sel); border-color: var(--accent); }
-.fitem .ico { width: 42px; height: 42px; }
+/* One fixed-height box for both the type icon and the thumbnail, so every tile
+   is the same height and the row pitch is uniform. */
+.fitem .visual { width: 100%; height: 78px; display: grid; place-items: center; }
+.fitem .visual .ico { width: 42px; height: 42px; }
 .fitem .nm { font-size: 12.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: break-all; }
 
 /* list rows */
@@ -149,7 +159,10 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .frow .sz { width: 84px; text-align: right; }
 .frow .mt { width: 130px; }
 .frow .ow { width: 120px; overflow: hidden; text-overflow: ellipsis; }
-.list-head { display: flex; gap: 10px; padding: 4px 8px; color: var(--text3); font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; position: sticky; top: 0; background: var(--bg); z-index: 2; }
+/* Sits above the scroll viewport (not sticky inside it) — a sticky header
+   cannot coexist with absolutely-positioned rows. */
+.list-head { display: flex; gap: 10px; padding: 4px 14px; color: var(--text3); font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; background: var(--bg); }
+.list-head[hidden] { display: none; }
 .list-head span { cursor: pointer; }
 .list-head .nm { flex: 1; padding-left: 28px; } /* clear the 18px icon + 10px gap in .frow */
 .list-head .sz { width: 84px; text-align: right; }
@@ -201,8 +214,15 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .selbar[hidden] { display: none; }
 .selbar .sel-count { font-size: 12.5px; color: var(--text2); font-weight: 600; margin-right: 4px; }
 
+/* Optimistic-operation feedback. `.pending` = waiting on the server,
+   `.failed` = reverted, with the reason shown in the row's tooltip. */
+.frow.pending, .fitem.pending { opacity: .55; }
+.frow.failed, .fitem.failed { outline: 1px solid var(--err); outline-offset: -1px; }
+
 /* ---------- row hover actions ---------- */
 .row-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity .12s; }
+/* `.btn` sets display:inline-flex, which would beat the UA [hidden] rule. */
+.row-actions .btn[hidden] { display: none; }
 .frow:hover .row-actions, .frow:focus-within .row-actions, .frow.selected .row-actions { opacity: 1; }
 .btn.icon.sm { padding: 3px 5px; }
 .btn.icon.sm svg.icon { width: 15px; height: 15px; }
@@ -213,11 +233,14 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .fm-toolbar .sort-select { flex-shrink: 0; font-size: 12.5px; padding: 5px 8px; }
 
 /* ---------- loading skeleton ---------- */
-.skeleton-wrap { display: contents; }
+/* The skeleton is transient, so it is NOT virtualized: it flows normally
+   inside the scroll container while the spacer stays collapsed. */
+.skeleton-wrap { display: block; }
+.filelist.grid .skeleton-wrap { display: flex; flex-wrap: wrap; gap: var(--tile-gap); }
 .skeleton { pointer-events: none; }
 .skeleton .sk-ico { width: 18px; height: 18px; border-radius: 4px; background: var(--bg3); flex-shrink: 0; }
 .skeleton .sk-line { height: 10px; border-radius: 5px; background: var(--bg3); flex: 1; }
-.filelist.grid .skeleton { flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; }
+.filelist.grid .skeleton { flex: 0 0 var(--tile-min); flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; }
 .filelist.grid .skeleton .sk-ico { width: 42px; height: 42px; border-radius: 8px; }
 .filelist.grid .skeleton .sk-line { width: 70%; flex: none; }
 .skeleton .sk-ico, .skeleton .sk-line {
@@ -279,6 +302,8 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .jobdrawer .jobs { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 .jobcard { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
 .jobcard .row { display: flex; align-items: center; gap: 8px; }
+/* `.row` sets display:flex, which would beat the UA [hidden] rule. */
+.jobcard .row[hidden] { display: none; }
 .jobcard .type { font-weight: 600; }
 .jobcard .st { margin-left: auto; font-size: 12px; color: var(--text2); }
 .jobcard .prog { height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
@@ -313,7 +338,9 @@ body.jobdrawer-open .uploadtray { right: calc(min(360px, 100vw) + 14px); }
 .uprow .r { display: flex; gap: 8px; align-items: center; font-size: 12.5px; }
 .uprow .r .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .uprow .prog { height: 5px; background: var(--bg3); border-radius: 3px; overflow: hidden; margin-top: 4px; }
-.uprow .prog > i { display: block; height: 100%; background: var(--accent); transition: width .2s; }
+/* Scale rather than animate width: progress events arrive far faster than a
+   layout per tick can be absorbed. */
+.uprow .prog > i { display: block; height: 100%; width: 100%; background: var(--accent); transform: scaleX(0); transform-origin: left center; transition: transform .2s linear; }
 .uprow.err .prog > i { background: var(--err); }
 
 /* An <svg> with no intrinsic size defaults to 300x150, which wrecked the shell
