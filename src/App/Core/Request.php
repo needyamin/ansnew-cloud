@@ -33,7 +33,7 @@ final class Request
         array $files = [],
     ) {
         $this->query = $query;
-        $this->files = $files;
+        $this->files = self::flattenFiles($files);
 
         foreach ($_SERVER as $k => $v) {
             if (str_starts_with($k, 'HTTP_')) {
@@ -136,9 +136,49 @@ final class Request
     }
 
     /** @return array<string,mixed> */
+    /** @return array<int, array<string,mixed>> one descriptor per uploaded file */
     public function files(): array
     {
         return $this->files;
+    }
+
+    /**
+     * Normalise PHP's two possible $_FILES shapes into a flat list.
+     *
+     * A single `<input name="files">` arrives as one associative descriptor, but
+     * a repeated field (`files[]`, which is what a multi-select or a folder
+     * upload produces) arrives as *parallel arrays*: `name[0], name[1], …`,
+     * `tmp_name[0], tmp_name[1], …`. Iterating that as if it were one file made
+     * `is_uploaded_file()` receive an array, so every file after the first was
+     * silently dropped — a multi-file upload appeared to "work" while only one
+     * file ever landed.
+     *
+     * @param array<string,mixed> $files
+     * @return array<int, array<string,mixed>>
+     */
+    private static function flattenFiles(array $files): array
+    {
+        $out = [];
+        foreach ($files as $field) {
+            if (!is_array($field) || !array_key_exists('name', $field)) {
+                continue;
+            }
+            if (!is_array($field['name'])) {
+                $out[] = $field;
+                continue;
+            }
+            foreach (array_keys($field['name']) as $i) {
+                $out[] = [
+                    'name' => (string) ($field['name'][$i] ?? ''),
+                    'full_path' => (string) ($field['full_path'][$i] ?? ''),
+                    'type' => (string) ($field['type'][$i] ?? ''),
+                    'tmp_name' => (string) ($field['tmp_name'][$i] ?? ''),
+                    'error' => (int) ($field['error'][$i] ?? UPLOAD_ERR_NO_FILE),
+                    'size' => (int) ($field['size'][$i] ?? 0),
+                ];
+            }
+        }
+        return $out;
     }
 
     public function ip(): string

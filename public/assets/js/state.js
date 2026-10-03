@@ -16,7 +16,33 @@ export const state = {
   clipboard: null,    // { mode: 'copy'|'cut', items: [{mount, path, name, isDir}] }
   pane2: null,        // second pane location { mount, path }
   panes: new Set(),   // live FilesPane instances — lets WS events target open panes
+
+  favorites: [],      // [{ mount, path, label, created_at }]
+  favoriteKeys: new Set(), // "mount:path" — O(1) lookup while rendering rows
+  recent: [],         // [{ mount, path, name, action, type, at, ... }]
+
+  sidebarCollapsed: localStorage.getItem('ansnew.sidebar') === '1',
 };
+
+/* ------------------------------------------------------------- favourites */
+
+export function favoriteKey(mount, path) { return mount + ':' + path; }
+
+/** Is this exact item favourited? Used by row rendering and menus. */
+export function isFavorite(mount, path) {
+  return state.favoriteKeys.has(favoriteKey(mount, path));
+}
+
+/** Replace the favourite list and rebuild the lookup set in one step. */
+export function setFavorites(list) {
+  state.favorites = Array.isArray(list) ? list : [];
+  state.favoriteKeys = new Set(state.favorites.map((f) => favoriteKey(f.mount, f.path)));
+}
+
+export function setSidebarCollapsed(collapsed) {
+  state.sidebarCollapsed = !!collapsed;
+  localStorage.setItem('ansnew.sidebar', state.sidebarCollapsed ? '1' : '0');
+}
 
 export function saveSession(user, csrf) {
   state.user = user;

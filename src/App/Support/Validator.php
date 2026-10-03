@@ -55,7 +55,7 @@ final class Validator
 
     public static function adapter(string $v): string
     {
-        $ok = ['local', 'ftp', 'ftps', 'sftp', 'smb', 'http'];
+        $ok = ['local', 'ftp', 'ftps', 'sftp', 'smb', 'http', 's3'];
         if (!in_array($v, $ok, true)) {
             throw new InvalidArgumentException('Unknown adapter');
         }
@@ -64,7 +64,7 @@ final class Validator
 
     public static function protocol(string $v): string
     {
-        $ok = ['ftp', 'ftps', 'sftp', 'smb', 'http'];
+        $ok = ['ftp', 'ftps', 'sftp', 'smb', 'http', 's3'];
         if (!in_array($v, $ok, true)) {
             throw new InvalidArgumentException('Unknown protocol');
         }

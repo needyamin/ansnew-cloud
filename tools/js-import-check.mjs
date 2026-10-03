@@ -90,9 +90,15 @@ for (const f of files) {
   for (const n of exportsFor(f)) if (!allExports.has(n)) allExports.set(n, f);
 }
 
+/** Strip comments so prose like "an explicit refresh (F5)" isn't read as a call. */
+const stripComments = (s) => s
+  .replace(/\/\*[\s\S]*?\*\//g, ' ')
+  .replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1');
+
 for (const file of files) {
-  const src = readFileSync(join(DIR, file), 'utf8');
-  const imported = new Set(importsOf(src).flatMap((i) => i.names));
+  const raw = readFileSync(join(DIR, file), 'utf8');
+  const src = stripComments(raw);
+  const imported = new Set(importsOf(raw).flatMap((i) => i.names));
   const own = exportsFor(file);
   for (const [name, from] of allExports) {
     if (from === file || imported.has(name) || own.has(name)) continue;

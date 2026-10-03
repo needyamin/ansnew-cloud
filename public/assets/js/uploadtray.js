@@ -58,9 +58,14 @@ function setBar(r, ratio) {
  * `onFinished` may be a callback, or a FilesPane — in which case the incoming
  * files are shown immediately and the pane is silently revalidated once the
  * whole batch settles. Either way it fires on COMPLETION.
+ *
+ * @returns {Promise<Array<{name:string,path:string,size:number}>>} the files the
+ *          server actually created (conflict renames included), so callers can
+ *          record them in Recent.
  */
-export function runUploadsWithUI(files, mount, dir, conflict, onFinished) {
-  if (!files.length) return;
+export function runUploadsWithUI(files, mount, dir, conflict, onFinished, opts = {}) {
+  if (!files.length) return Promise.resolve([]);
+  const relPathFor = opts.relPathFor || null;
   ensureTray();
 
   const pane = (onFinished && typeof onFinished === 'object') ? onFinished : null;
@@ -74,7 +79,10 @@ export function runUploadsWithUI(files, mount, dir, conflict, onFinished) {
   if (onScreen) {
     const adds = [];
     for (const f of files) {
-      const tmp = joinPath(dir, `__uploading__/${f.name}`);
+      // For a folder upload the relative path is what identifies the file, so
+      // the provisional row carries it too.
+      const rel = relPathFor ? (relPathFor(f) || f.name) : f.name;
+      const tmp = joinPath(dir, `__uploading__/${rel}`);
       provisional.set(f, tmp);
       adds.push(syntheticEntry(tmp, f.name, 'file', f.size));
     }
@@ -106,7 +114,9 @@ export function runUploadsWithUI(files, mount, dir, conflict, onFinished) {
     listNode.appendChild(row);
   }
 
-  uploadBatch(files, mount, dir, conflict,
+  const uploaded = [];
+
+  return uploadBatch(files, mount, dir, conflict,
     (f, loaded, total) => {
       const r = rows.get(f);
       if (r) setBar(r, total ? loaded / total : 0);
@@ -124,16 +134,20 @@ export function runUploadsWithUI(files, mount, dir, conflict, onFinished) {
       dropProvisional(f);
       // Reconcile the provisional row with what the server actually created —
       // this is what surfaces a "name (2).ext" conflict rename.
-      if (onScreen && !pane.destroyed && result && result.path) {
-        pane.applyLocal({ add: [syntheticEntry(result.path, result.name || f.name, 'file', result.size || f.size)] });
+      if (result && result.path) {
+        uploaded.push({ name: result.name || f.name, path: result.path, size: result.size || f.size });
+        if (onScreen && !pane.destroyed) {
+          pane.applyLocal({ add: [syntheticEntry(result.path, result.name || f.name, 'file', result.size || f.size)] });
+        }
       }
       if (r) setTimeout(() => { r.row.remove(); rows.delete(f); maybeHide(); }, err ? 6000 : 1500);
     },
-    { signalFor: (f) => (rows.get(f) ? rows.get(f).ctrl.signal : undefined) })
+    { signalFor: (f) => (rows.get(f) ? rows.get(f).ctrl.signal : undefined), relPathFor })
     .then(() => {
       if (finish) finish();
       else if (pane && !pane.destroyed) pane.revalidate();
       maybeHide();
+      return uploaded;
     })
-    .catch(() => { /* per-file errors are already reported in the tray */ });
+    .catch(() => uploaded);
 }

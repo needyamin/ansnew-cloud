@@ -47,15 +47,55 @@ final class FavoritesService
         );
     }
 
-    public static function recordRecent(AuthContext $user, string $mount, string $path, string $name, string $action = 'open'): void
-    {
-        if (!in_array($action, ['open', 'download', 'preview'], true)) {
+    /** Actions that appear in the Recent list. */
+    public const RECENT_ACTIONS = ['open', 'download', 'preview', 'upload', 'create'];
+
+    /**
+     * Record (or refresh) a recent entry.
+     *
+     * Upserted per (user, mount, path) rather than appended: revisiting a file
+     * should move it to the top, not fill the list with duplicates of the same
+     * path. `modified_at`/`size`/`type` are carried so the Recent view can show
+     * useful metadata without re-statting every row.
+     */
+    public static function recordRecent(
+        AuthContext $user,
+        string $mount,
+        string $path,
+        string $name,
+        string $action = 'open',
+        string $type = 'file',
+        int $modifiedAt = 0,
+        int $size = 0
+    ): void {
+        if (!in_array($action, self::RECENT_ACTIONS, true)) {
             return;
         }
+        $mount = \App\Support\Validator::mountName($mount);
+        // Never let an unreadable mount poison the list.
+        StorageManager::mountFor($user, $mount);
+
         $db = Database::i();
         $db->run(
-            'INSERT INTO recent_files (user_id, mount, path, name, action) VALUES (:u,:m,:p,:n,:a)',
-            [':u' => $user->id, ':m' => $mount, ':p' => PathGuard::normalize($path), ':n' => mb_substr($name, 0, 255), ':a' => $action]
+            'INSERT INTO recent_files (user_id, mount, path, name, action, type, modified_at, size, at)
+             VALUES (:u,:m,:p,:n,:a,:t,:mod,:sz, datetime(\'now\'))
+             ON CONFLICT(user_id, mount, path) DO UPDATE SET
+                name = excluded.name,
+                action = excluded.action,
+                type = excluded.type,
+                modified_at = excluded.modified_at,
+                size = excluded.size,
+                at = datetime(\'now\')',
+            [
+                ':u' => $user->id,
+                ':m' => $mount,
+                ':p' => PathGuard::normalize($path),
+                ':n' => mb_substr($name, 0, 255),
+                ':a' => $action,
+                ':t' => $type === 'dir' ? 'dir' : 'file',
+                ':mod' => max(0, $modifiedAt),
+                ':sz' => max(0, $size),
+            ]
         );
         // Keep the rolling window bounded (latest 200 rows per user).
         $db->run(
@@ -69,9 +109,24 @@ final class FavoritesService
     public static function recent(AuthContext $user, int $limit = 30): array
     {
         return Database::i()->all(
-            'SELECT mount, path, name, action, at FROM recent_files
+            'SELECT mount, path, name, action, type, modified_at, size, at FROM recent_files
              WHERE user_id = :u ORDER BY at DESC, id DESC LIMIT ' . max(1, min(100, $limit)),
             [':u' => $user->id]
         );
+    }
+
+    /** Drop one entry, or the whole list when `$path` is null. */
+    public static function clearRecent(AuthContext $user, ?string $mount = null, ?string $path = null): int
+    {
+        $db = Database::i();
+        if ($mount === null || $path === null) {
+            $stmt = $db->run('DELETE FROM recent_files WHERE user_id = :u', [':u' => $user->id]);
+            return $stmt->rowCount();
+        }
+        $stmt = $db->run(
+            'DELETE FROM recent_files WHERE user_id = :u AND mount = :m AND path = :p',
+            [':u' => $user->id, ':m' => $mount, ':p' => PathGuard::normalize($path)]
+        );
+        return $stmt->rowCount();
     }
 }

@@ -17,22 +17,46 @@ use RuntimeException;
  */
 final class UploadService
 {
-    public static function handleUploadedFiles(AuthContext $user, string $mount, string $path, array $files, string $conflict = 'rename'): array
-    {
+    /**
+     * Store a batch of uploaded files.
+     *
+     * `$relPaths` (index-aligned with `$files`) carries each file's path
+     * relative to the chosen folder, so a folder upload keeps its structure.
+     * A missing entry falls back to the bare filename, which is the plain
+     * multi-file upload behaviour.
+     *
+     * @param array<int,string> $relPaths
+     */
+    public static function handleUploadedFiles(
+        AuthContext $user,
+        string $mount,
+        string $path,
+        array $files,
+        string $conflict = 'rename',
+        array $relPaths = []
+    ): array {
         $results = [];
         $dir = PathGuard::normalize($path);
+        $index = 0;
         foreach ($files as $file) {
+            $relPath = (string) ($relPaths[$index] ?? '');
+            $index++;
             if (!is_array($file) || !isset($file['tmp_name']) || !is_uploaded_file((string) $file['tmp_name'])) {
                 continue;
             }
-            $name = PathGuard::validateName((string) ($file['name'] ?? ''));
-            FileService::assertAllowedUpload($name);
             self::assertUploadSize((int) ($file['size'] ?? 0));
 
-            [, $adapter, ] = StorageManager::resolve($user, $mount, $dir);
-            $target = self::conflictTarget($adapter, $dir, $name, $conflict);
-            if ($target === null) {
-                $results[] = ['name' => $name, 'skipped' => true];
+            // Prefer the explicit relPaths entry; fall back to PHP's own
+            // `full_path` (populated for directory uploads) and then the name.
+            if ($relPath === '') {
+                $relPath = (string) ($file['full_path'] ?? '');
+            }
+            if ($relPath === '') {
+                $relPath = (string) ($file['name'] ?? '');
+            }
+            $plan = self::planTarget($user, $mount, $dir, $relPath, $conflict);
+            if ($plan['target'] === null) {
+                $results[] = ['name' => $plan['name'], 'skipped' => true];
                 continue;
             }
             $fh = fopen((string) $file['tmp_name'], 'rb');
@@ -40,17 +64,85 @@ final class UploadService
                 throw new RuntimeException('Cannot read uploaded file');
             }
             try {
-                $adapter->putStream($target, $fh);
+                $plan['adapter']->putStream($plan['target'], $fh);
             } finally {
                 fclose($fh);
             }
-            $stat = $adapter->stat($target);
-            $results[] = ['name' => (string) $stat['name'], 'path' => $target, 'size' => (int) $stat['size']];
+            $stat = $plan['adapter']->stat($plan['target']);
+            $results[] = ['name' => (string) $stat['name'], 'path' => $plan['target'], 'size' => (int) $stat['size']];
         }
         if ($results === []) {
             throw new InvalidArgumentException('No files received');
         }
         return $results;
+    }
+
+    /**
+     * Work out where an upload should land, creating any directories its
+     * relative path implies.
+     *
+     * @return array{adapter:\App\Storage\StorageAdapter,target:?string,name:string,dir:string}
+     */
+    private static function planTarget(
+        AuthContext $user,
+        string $mount,
+        string $baseDir,
+        string $relPath,
+        string $conflict
+    ): array {
+        $segments = self::splitRelativePath($relPath);
+        $name = (string) array_pop($segments);
+        FileService::assertAllowedUpload($name);
+
+        $destDir = $baseDir;
+        foreach ($segments as $segment) {
+            $destDir = PathGuard::join($destDir, $segment);
+        }
+
+        [$m, $adapter, $normDir] = StorageManager::resolve($user, $mount, $destDir);
+        // A per-user read-only grant must block writes too; StorageManager alone
+        // does not enforce canWrite.
+        FileService::assertWritable($m, $adapter);
+
+        if ($segments !== [] && !$adapter->isDir($normDir)) {
+            $adapter->mkdir($normDir, true);
+        }
+
+        return [
+            'adapter' => $adapter,
+            'target' => self::conflictTarget($adapter, $normDir, $name, $conflict),
+            'name' => $name,
+            'dir' => $normDir,
+        ];
+    }
+
+    /**
+     * Split and validate a relative upload path.
+     *
+     * Every segment goes through PathGuard::validateName, so separators, control
+     * characters and over-long names are rejected — and `..` is refused outright.
+     * Traversal is therefore impossible even though the client controls the path.
+     *
+     * @return array<int,string>
+     */
+    private static function splitRelativePath(string $relPath): array
+    {
+        $rel = str_replace('\\', '/', trim($relPath));
+        $parts = [];
+        foreach (explode('/', $rel) as $part) {
+            $part = trim($part);
+            if ($part === '' || $part === '.') {
+                continue;
+            }
+            if ($part === '..') {
+                throw new InvalidArgumentException('Upload path must not contain ".."');
+            }
+            $parts[] = PathGuard::validateName($part);
+        }
+        if ($parts === []) {
+            throw new InvalidArgumentException('Empty upload path');
+        }
+        return $parts;
     }
 
     public static function storeChunk(AuthContext $user, string $mount, array $body, array $files): array
@@ -83,8 +175,8 @@ final class UploadService
             throw new InvalidArgumentException('Invalid uploadId');
         }
         $dir = PathGuard::normalize((string) ($body['path'] ?? '/'));
-        $name = PathGuard::validateName((string) ($body['name'] ?? ''));
-        FileService::assertAllowedUpload($name);
+        // Large files inside a folder upload carry a relative path too.
+        $relPath = (string) ($body['relPath'] ?? '');
         $total = Validator::int($body['total'] ?? 0, 1, 1000000, 'total');
         $conflict = in_array($body['conflict'] ?? 'rename', ['overwrite', 'skip', 'rename'], true)
             ? (string) ($body['conflict'] ?? 'rename') : 'rename';
@@ -94,8 +186,10 @@ final class UploadService
             throw new RuntimeException('Upload session missing', 404);
         }
 
-        [, $adapter, ] = StorageManager::resolve($user, $mount, $dir);
-        $target = self::conflictTarget($adapter, $dir, $name, $conflict);
+        $plan = self::planTarget($user, $mount, $dir, $relPath !== '' ? $relPath : (string) ($body['name'] ?? ''), $conflict);
+        $adapter = $plan['adapter'];
+        $target = $plan['target'];
+        $name = $plan['name'];
         if ($target === null) {
             self::rrmdir($stage);
             return ['skipped' => true];

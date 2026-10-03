@@ -77,7 +77,23 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .sidebar {
   width: 230px; flex-shrink: 0; background: var(--bg2); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; overflow-y: auto; padding: 10px 8px; gap: 2px;
-  transition: transform .2s ease;
+  transition: transform .2s ease, width .18s ease, padding .18s ease;
+}
+.sidebar .side-head { justify-content: flex-start; }
+.sidebar .side-head .brand { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-toggle { flex-shrink: 0; }
+
+/* Collapsed rail: icons only, labels hidden, tooltips carry the meaning.
+   Scoped above the drawer breakpoint — on narrow screens the sidebar is an
+   overlay drawer and collapsing it would just hide the icons too. */
+@media (min-width: 901px) {
+  .sidebar.collapsed { width: 58px; padding: 10px 6px; }
+  .sidebar.collapsed .side-head { justify-content: center; padding: 4px 0 12px; }
+  .sidebar.collapsed .side-head .brand { display: none; }
+  .sidebar.collapsed .side-sec { display: none; }
+  .sidebar.collapsed .side-item { justify-content: center; padding: 9px 0; }
+  .sidebar.collapsed .side-item .lbl,
+  .sidebar.collapsed .side-item .usage-bar { display: none; }
 }
 /* Backdrop for the overlay drawer (<=900px only; never rendered on desktop). */
 .scrim { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 940; }
@@ -94,6 +110,27 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .side-item.active { background: var(--sel); color: var(--text); }
 .side-item .ico { width: 16px; height: 16px; flex-shrink: 0; }
 .side-item .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Section header that carries a trailing action (e.g. Recent → "All"). */
+.side-sec-row { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.link-btn { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
+.link-btn:hover { text-decoration: underline; }
+.sidebar.collapsed .side-sec-row .link-btn { display: none; }
+
+/* Drives / connections forms: two fields per row where there is space. */
+.field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.field-grid .field { min-width: 0; }
+.field-grid .checkbox, .field-grid p { grid-column: 1 / -1; }
+.field-grid > button { justify-self: start; }
+@media (max-width: 560px) { .field-grid { grid-template-columns: 1fr; } }
+.table .row-actions-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn.sm { padding: 4px 9px; font-size: 12.5px; }
+.table code { font-size: 12px; }
+
+/* Recent view: the name cell is a button with a leading type icon. */
+.table td .link-btn { display: inline-flex; align-items: center; gap: 6px; }
+.table td .link-btn svg.icon { width: 15px; height: 15px; color: var(--text2); }
+.table td .link-btn:hover svg.icon { color: var(--accent); }
+
 .side-item .usage-bar { height: 4px; background: var(--bg3); border-radius: 2px; margin-top: 3px; overflow: hidden; }
 .side-item .usage-bar > i { display: block; height: 100%; background: var(--accent); }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -213,6 +250,17 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 }
 .selbar[hidden] { display: none; }
 .selbar .sel-count { font-size: 12.5px; color: var(--text2); font-weight: 600; margin-right: 4px; }
+
+/* ---------- favourites ---------- */
+/* A class, not [hidden]: `svg.icon` sets display:inline-block, which would beat
+   the UA [hidden] rule and leave the star visible on everything. */
+.fav-mark { display: none; color: var(--warn); width: 13px; height: 13px; margin-left: -4px; }
+.fav-mark.on { display: inline-block; }
+.fitem .fav-mark { position: absolute; top: 6px; right: 6px; margin: 0; width: 15px; height: 15px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
+.fitem { position: relative; }
+/* The toggle reads as "on" without needing hover. */
+.row-actions .fav.active { color: var(--warn); }
+.btn.active { border-color: var(--warn); color: var(--warn); }
 
 /* Optimistic-operation feedback. `.pending` = waiting on the server,
    `.failed` = reverted, with the reason shown in the row's tooltip. */

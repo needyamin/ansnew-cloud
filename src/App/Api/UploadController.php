@@ -26,7 +26,17 @@ final class UploadController
         $user = Guard::requireUser($session);
         $path = (string) $req->input('path', '/');
         $conflict = (string) $req->input('conflict', 'rename');
-        $results = UploadService::handleUploadedFiles($user, $mount, $path, $req->files(), $conflict);
+        // Folder uploads send a JSON array of paths relative to the picked
+        // folder, index-aligned with the files, so nested structure survives.
+        $relPaths = [];
+        $raw = (string) $req->input('relPaths', '');
+        if ($raw !== '') {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                $relPaths = array_values(array_map('strval', $decoded));
+            }
+        }
+        $results = UploadService::handleUploadedFiles($user, $mount, $path, $req->files(), $conflict, $relPaths);
         AuditService::log($user, 'fs.upload', $mount, $path, null, 'ok', count($results) . ' file(s)', $req->ip(), $req->userAgent());
         NotifyService::fsChanged($user->id, [$mount => [$path]], 'upload');
         return Response::ok(['files' => $results]);

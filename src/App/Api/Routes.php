@@ -49,6 +49,20 @@ final class Routes
         $r->post('/api/upload/{mount}/chunk', fn($req, $m) => UploadController::chunk($req, $session, $m));
         $r->post('/api/upload/{mount}/complete', fn($req, $m) => UploadController::complete($req, $session, $m));
 
+        // ---- drives (user-facing mount management) ----
+        $r->get('/api/drives', fn($req) => DriveController::list($req, $session));
+        $r->get('/api/drives/types', fn($req) => DriveController::types($req, $session));
+        $r->post('/api/drives', fn($req) => DriveController::create($req, $session));
+        $r->post('/api/drives/{id}/rename', fn($req, $id) => DriveController::rename($req, $session, (int) $id));
+        $r->delete('/api/drives/{id}', fn($req, $id) => DriveController::disconnect($req, $session, (int) $id));
+
+        // ---- connections (user-facing remote storage credentials) ----
+        $r->get('/api/connections', fn($req) => ConnectionController::list($req, $session));
+        $r->post('/api/connections', fn($req) => ConnectionController::create($req, $session));
+        $r->post('/api/connections/test', fn($req) => ConnectionController::testDraft($req, $session));
+        $r->post('/api/connections/{id}/test', fn($req, $id) => ConnectionController::test($req, $session, (int) $id));
+        $r->delete('/api/connections/{id}', fn($req, $id) => ConnectionController::delete($req, $session, (int) $id));
+
         // ---- jobs ----
         $r->get('/api/jobs', fn($req) => JobController::list($req, $session));
         $r->post('/api/jobs/{id}/cancel', fn($req, $id) => JobController::cancel($req, $session, $id));
@@ -59,6 +73,7 @@ final class Routes
         $r->delete('/api/favorites', fn($req) => FavoritesController::remove($req, $session));
         $r->get('/api/recent', fn($req) => FavoritesController::recent($req, $session));
         $r->post('/api/recent', fn($req) => FavoritesController::recordRecent($req, $session));
+        $r->delete('/api/recent', fn($req) => FavoritesController::clearRecent($req, $session));
 
         // ---- trash ----
         $r->get('/api/trash/{mount}', fn($req, $m) => TrashController::list($req, $session, $m));

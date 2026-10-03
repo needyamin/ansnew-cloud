@@ -165,7 +165,11 @@ async function get(url, opts = {}) {
 
   const cached = cache.get(key);
   const now = Date.now();
-  if (cached && ttl > 0 && (now - cached.ts) < ttl) return cached.data;
+  // `force` (F5, the toolbar refresh, a post-mutation revalidate) must bypass
+  // BOTH shortcuts. Missing the guard here meant an explicit refresh silently
+  // returned the cached listing for the full TTL, and then the stale window
+  // below did the same for up to five minutes — the UI looked frozen.
+  if (!opts.force && cached && ttl > 0 && (now - cached.ts) < ttl) return cached.data;
 
   const p = (async () => {
     try {
@@ -188,7 +192,12 @@ async function get(url, opts = {}) {
 
   // Stale-while-revalidate: serve what we have immediately and refresh behind
   // the scenes, so opening a recently-visited folder is instant.
-  if (cached && stale > ttl && (now - cached.ts) < stale) {
+  //
+  // `force` MUST be honoured here too. Without it an explicit refresh (F5, the
+  // toolbar button, a post-mutation revalidate) silently returned cached data
+  // for the whole stale window — the listing appeared to stop updating, while a
+  // background request quietly refreshed a cache nothing re-rendered from.
+  if (!opts.force && cached && stale > ttl && (now - cached.ts) < stale) {
     p.catch(() => { /* background refresh must never surface as an error */ });
     return cached.data;
   }

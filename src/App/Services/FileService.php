@@ -313,7 +313,13 @@ final class FileService
         throw new RuntimeException('No free name for conflict rename');
     }
 
-    private static function assertWritable(Mount $mount, StorageAdapter $adapter): void
+    /**
+     * Reject a write the user is not entitled to make.
+     *
+     * StorageManager::resolve() only decides *visibility*; per-user write denial
+     * lives here, so every write path (uploads included) must call it.
+     */
+    public static function assertWritable(Mount $mount, StorageAdapter $adapter): void
     {
         if (!$mount->canWrite) {
             throw new RuntimeException('This mount is read-only or you lack write access', 403);

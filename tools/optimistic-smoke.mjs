@@ -283,13 +283,28 @@ try {
   const allPresent = (await rowPaths()).filter(p => files.some(f => p === '/' + f)).length;
   check('three files created', allPresent === 3, 'found=' + allPresent);
 
-  // Select all three (click the first, ctrl-click the rest).
-  await evaluate(`(() => {
-    const want = ${JSON.stringify(files.map(f => '/' + f))};
-    const rows = want.map(p => [...document.querySelectorAll('.filelist [data-path]')].find(e => e.dataset.path === p)).filter(Boolean);
-    rows.forEach((r, i) => r.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: i > 0 })));
-    return rows.length;
-  })()`);
+  // Select all three (click the first, ctrl-click the rest). The list is
+  // windowed, so each row is scrolled into view before it is clicked.
+  for (const [i, f] of files.entries()) {
+    const p = '/' + f;
+    const found = await evaluate(`(async () => {
+      const l = document.querySelector('.filelist');
+      const target = ${JSON.stringify(p)};
+      const step = Math.max(80, Math.floor(l.clientHeight * 0.75));
+      for (let y = 0; y <= l.scrollHeight + step; y += step) {
+        l.scrollTop = y;
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const row = [...document.querySelectorAll('.filelist [data-path]')].find(e => e.dataset.path === target);
+        if (row) {
+          row.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: ${i > 0} }));
+          return true;
+        }
+      }
+      return false;
+    })()`);
+    if (!found) { check('file row selectable: ' + f, false, 'row not found'); }
+    await sleep(200);
+  }
   await sleep(400);
   const selText = await evaluate(`document.querySelector('.sel-count')?.textContent || ''`);
   check('three files selected', selText.includes('3'), 'sel-count=' + selText);

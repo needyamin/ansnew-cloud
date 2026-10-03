@@ -1,6 +1,7 @@
 'use strict';
 /* File operations: mkdir, rename, delete, copy/move (clipboard), archive, extract, favorites, trash helpers. */
 import { api, listKey, invalidate, invalidateList } from './api.js';
+import { state, isFavorite, setFavorites } from './state.js';
 import { toast, toastOk, toastErr } from './ui.js';
 
 export { listKey };
@@ -116,21 +117,29 @@ export async function consumeDownloadToken(token) {
   a.remove();
 }
 
+/**
+ * Add or remove a favourite.
+ *
+ * The current state comes from the in-memory set (kept in sync with the server
+ * by refreshSidebarData) rather than a fresh GET, so the star flips instantly
+ * and the call can't be wrong-footed by a stale cached list.
+ *
+ * @returns {Promise<boolean>} the NEW state — true if now favourited
+ */
 export async function toggleFavorite(mount, path, label) {
-  // Already loaded by refreshSidebarData() — no need for the extra round trip
-  // this used to make just to decide which way to toggle.
-  const { favorites } = await api.get('/api/favorites', { cacheKey: 'favorites', ttl: 30000 });
-  const exists = (favorites || []).some(f => f.mount === mount && f.path === path);
-  if (exists) {
-    await api.delete('/api/favorites', { mount, path });
-    invalidate('favorites');
-    toastOk('Removed from favorites');
-    return false;
+  const on = isFavorite(mount, path);
+  if (on) {
+    // Params go in the query string, not a DELETE body — see the note on
+    // FavoritesController::remove.
+    await api.delete(`/api/favorites?mount=${encodeURIComponent(mount)}&path=${encodeURIComponent(path)}`);
+    setFavorites(state.favorites.filter((f) => !(f.mount === mount && f.path === path)));
+  } else {
+    await api.post('/api/favorites', { mount, path, label });
+    setFavorites([{ mount, path, label }, ...state.favorites]);
   }
-  await api.post('/api/favorites', { mount, path, label });
   invalidate('favorites');
-  toastOk('Added to favorites');
-  return true;
+  toastOk(on ? 'Removed from favourites' : 'Added to favourites');
+  return !on;
 }
 
 export async function trashList(mount) {

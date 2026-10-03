@@ -24,7 +24,7 @@
  */
 import { el, clear, fmtSize, fmtDate, debounce } from './util.js';
 import { icon, iconFor } from './icons.js';
-import { state } from './state.js';
+import { state, isFavorite } from './state.js';
 import { api } from './api.js';
 import { fsList } from './fsops.js';
 import { preview } from './preview.js';
@@ -115,6 +115,7 @@ export class FilesPane {
     this.onNewFolder = opts.onNewFolder || null;
     this.onNewFile = opts.onNewFile || null;
     this.onUpload = opts.onUpload || null;
+    this.onOpenEntry = opts.onOpenEntry || null;   // (pane, entry) — Recent tracking
 
     this.crumbs = el('div', { class: 'crumbs' });
 
@@ -307,7 +308,10 @@ export class FilesPane {
     this.render({ anchor });
   }
 
-  /** Re-apply pending/failed markers to the rows currently on screen. */
+  /**
+   * Re-apply row decorations (favourite star, pending, failed) to the rows
+   * currently on screen, without a re-render.
+   */
   refreshDecorations() {
     for (const node of this.rendered.values()) {
       const entry = this.entryOf(node);
@@ -316,6 +320,7 @@ export class FilesPane {
       const msg = this.failed.get(entry.path);
       node.classList.toggle('failed', !!msg);
       node.title = msg || entry.name;
+      this.applyFavMark(node, entry);
     }
   }
 
@@ -496,21 +501,24 @@ export class FilesPane {
   buildRowNode() {
     const ico = icon('file', 'ico');
     const nm = el('span', { class: 'nm' });
+    // Always-visible marker so favourite state is scannable without hovering.
+    const favMark = icon('star', 'fav-mark');
     const sz = el('span', { class: 'sz' });
     const mt = el('span', { class: 'mt' });
     const ow = el('span', { class: 'ow' });
     const actions = this.buildRowActions();
-    const node = el('div', { class: 'frow', role: 'option', draggable: 'true' }, ico, nm, sz, mt, ow, actions);
-    node._refs = { ico, nm, sz, mt, ow, actions };
+    const node = el('div', { class: 'frow', role: 'option', draggable: 'true' }, ico, nm, favMark, sz, mt, ow, actions);
+    node._refs = { ico, nm, favMark, sz, mt, ow, actions };
     return node;
   }
 
   buildGridNode() {
     const ico = icon('file', 'ico');
     const visual = el('div', { class: 'visual' }, ico);
+    const favMark = icon('star', 'fav-mark');
     const nm = el('div', { class: 'nm' });
-    const node = el('div', { class: 'fitem', role: 'option', draggable: 'true' }, visual, nm);
-    node._refs = { visual, ico, nm };
+    const node = el('div', { class: 'fitem', role: 'option', draggable: 'true' }, visual, favMark, nm);
+    node._refs = { visual, ico, favMark, nm };
     return node;
   }
 
@@ -531,9 +539,12 @@ export class FilesPane {
       return b;
     };
     const dl = mk('download', 'Download', (entry) => this.onDownload && this.onDownload(this, [entry]));
+    const fav = mk('star-outline', 'Add to favourites',
+      (entry) => this.onToggleFavorite && this.onToggleFavorite(this, entry), 'fav');
     mk('edit', 'Rename', (entry) => this.onRename && this.onRename(this, entry));
     mk('trash', 'Delete', (entry) => this.onDelete && this.onDelete(this, [entry]), 'danger');
     box._dl = dl;
+    box._fav = fav;
     return box;
   }
 
@@ -564,6 +575,7 @@ export class FilesPane {
     node.classList.toggle('failed', !!failMsg);
     node.title = failMsg || entry.name;
     this.applySelClass(node);
+    this.applyFavMark(node, entry);
 
     if (grid) {
       const { visual, ico, nm } = node._refs;
@@ -771,6 +783,27 @@ export class FilesPane {
   }
 
   /**
+   * Paint favourite state on a row: the badge next to the name and the toggle
+   * button's icon/label. Driven by the shared favourite set, so it stays correct
+   * across recycles and after a reload.
+   */
+  applyFavMark(node, entry) {
+    const on = isFavorite(this.loc.mount, entry.path);
+    // A class rather than [hidden] — `svg.icon` sets display:inline-block, which
+    // would otherwise beat the UA [hidden] rule.
+    if (node._refs.favMark) node._refs.favMark.classList.toggle('on', on);
+    const fav = node._refs.actions && node._refs.actions._fav;
+    if (!fav) return;
+    fav.classList.toggle('active', on);
+    const label = on ? 'Remove from favourites' : 'Add to favourites';
+    if (fav.title !== label) {
+      fav.title = label;
+      fav.setAttribute('aria-label', label);
+      setIcon(fav.firstChild, on ? 'star' : 'star-outline');
+    }
+  }
+
+  /**
    * Repaint only the nodes that exist. Off-window rows are "painted" by fill()
    * the moment they scroll into view, so the Set stays the source of truth.
    */
@@ -811,6 +844,8 @@ export class FilesPane {
   /* =========================================================== actions */
 
   open(entry) {
+    // Let the shell note this in Recent before we navigate away.
+    if (this.onOpenEntry) this.onOpenEntry(this, entry);
     if (entry.type === 'dir') this.navigate(this.loc.mount, entry.path);
     else preview(entry, this.loc.mount);
   }

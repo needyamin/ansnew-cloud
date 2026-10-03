@@ -8,6 +8,7 @@
  */
 import { el, clear, fmtSize, fmtDate } from './util.js';
 import { icon, iconFor } from './icons.js';
+import { isFavorite } from './state.js';
 import { isThumbnailable, thumbUrl } from './thumbnails.js';
 
 export class DetailsPanel {
@@ -103,7 +104,10 @@ export class DetailsPanel {
     add('Download', 'download', (es, p) => this.h.onDownload && this.h.onDownload(p, es));
     if (!bulk) add('Rename', 'edit', (es, p) => this.h.onRename && this.h.onRename(p, es[0]));
     if (!bulk && this.h.onToggleFavorite) {
-      add('Favorite', 'star', (es, p) => this.h.onToggleFavorite(es[0], p));
+      // Reflect the real state so the button is a toggle, not a one-way action.
+      const on = pane ? isFavorite(pane.loc.mount, entries[0].path) : false;
+      add(on ? 'Unfavourite' : 'Favourite', on ? 'star' : 'star-outline',
+        (es, p) => this.h.onToggleFavorite(es[0], p), on ? 'btn active' : 'btn');
     }
     add('Delete', 'trash', (es, p) => this.h.onDelete && this.h.onDelete(p, es), 'btn danger');
     return box;

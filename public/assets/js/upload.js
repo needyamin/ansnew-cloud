@@ -35,11 +35,13 @@ export function abortAllUploads() {
  * opts.signal: AbortSignal that cancels this file.
  */
 export function uploadFile(file, mount, dir, conflict = 'rename', onProgress = null, opts = {}) {
-  if (file.size > CHUNK_THRESHOLD) return uploadChunked(file, mount, dir, conflict, onProgress, opts.signal);
-  return uploadDirect(file, mount, dir, conflict, onProgress, opts.signal);
+  if (file.size > CHUNK_THRESHOLD) {
+    return uploadChunked(file, mount, dir, conflict, onProgress, opts.signal, opts.relPath);
+  }
+  return uploadDirect(file, mount, dir, conflict, onProgress, opts.signal, opts.relPath);
 }
 
-function uploadDirect(file, mount, dir, conflict, onProgress, signal) {
+function uploadDirect(file, mount, dir, conflict, onProgress, signal, relPath) {
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) { reject(new ApiError('Canceled', 0, 'aborted')); return; }
     const xhr = new XMLHttpRequest();
@@ -56,7 +58,12 @@ function uploadDirect(file, mount, dir, conflict, onProgress, signal) {
     const fd = new FormData();
     fd.append('path', dir);
     fd.append('conflict', conflict);
-    fd.append('files', file, file.name);
+    // Relative path (folder uploads) — index-aligned with the single file.
+    if (relPath) fd.append('relPaths', JSON.stringify([relPath]));
+    // `files[]`, not `files`: PHP keeps only the LAST value for a repeated
+    // non-array field name, so a plain `files` silently reduced any multi-file
+    // POST to a single upload.
+    fd.append('files[]', file, file.name);
     xhr.upload.onprogress = (e) => { if (onProgress && e.lengthComputable) onProgress(e.loaded, e.total); };
     xhr.onload = () => {
       cleanup();
@@ -79,7 +86,7 @@ function uploadDirect(file, mount, dir, conflict, onProgress, signal) {
   });
 }
 
-async function uploadChunked(file, mount, dir, conflict, onProgress, signal) {
+async function uploadChunked(file, mount, dir, conflict, onProgress, signal, relPath) {
   const uploadId = 'u' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
   const total = Math.ceil(file.size / CHUNK_SIZE);
   // Reuse the caller's signal so the tray's Cancel button works for large files
@@ -106,6 +113,7 @@ async function uploadChunked(file, mount, dir, conflict, onProgress, signal) {
     }
     return await api.post(`/api/upload/${encodeURIComponent(mount)}/complete`, {
       uploadId, path: dir, name: file.name, total, conflict,
+      ...(relPath ? { relPath } : {}),
     }, { signal: controller.signal });
   } finally {
     if (signal) signal.removeEventListener('abort', onAbortSignal);
@@ -125,6 +133,7 @@ async function uploadChunked(file, mount, dir, conflict, onProgress, signal) {
 export async function uploadBatch(files, mount, dir, conflict, onFileProgress, onFileDone, opts = {}) {
   const queue = [...files];
   const signalFor = opts.signalFor || null;
+  const relPathFor = opts.relPathFor || null;
   const limit = Math.max(1, Math.min(opts.concurrency || UPLOAD_CONCURRENCY, queue.length));
 
   const worker = async () => {
@@ -132,9 +141,10 @@ export async function uploadBatch(files, mount, dir, conflict, onFileProgress, o
       const f = queue.shift();
       if (!f) return;
       const signal = signalFor ? signalFor(f) : undefined;
+      const relPath = relPathFor ? relPathFor(f) : undefined;
       try {
         const r = await uploadFile(f, mount, dir, conflict,
-          (loaded, total) => onFileProgress(f, loaded, total), { signal });
+          (loaded, total) => onFileProgress(f, loaded, total), { signal, relPath });
         invalidateList(mount, dir);
         onFileDone(f, null, r);
       } catch (e) {

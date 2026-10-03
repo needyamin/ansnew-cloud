@@ -9,6 +9,7 @@ use App\Config\Config;
 use App\Core\Database;
 use App\Storage\Adapters\FtpAdapter;
 use App\Storage\Adapters\HttpAdapter;
+use App\Storage\Adapters\S3Adapter;
 use App\Storage\Adapters\LocalAdapter;
 use App\Storage\Adapters\SftpAdapter;
 use App\Storage\Adapters\SmbAdapter;
@@ -29,7 +30,7 @@ final class StorageManager
             'SELECT m.*, g.can_write AS grant_write
              FROM mounts m
              LEFT JOIN mount_grants g ON g.mount_id = m.id AND g.user_id = :uid
-             WHERE m.is_visible_all = 1 OR g.user_id IS NOT NULL
+             WHERE m.is_visible_all = 1 OR g.user_id IS NOT NULL OR m.owner_user_id = :uid
              ORDER BY m.name',
             [':uid' => $user->id]
         );
@@ -51,7 +52,7 @@ final class StorageManager
             'SELECT m.*, g.can_write AS grant_write
              FROM mounts m
              LEFT JOIN mount_grants g ON g.mount_id = m.id AND g.user_id = :uid
-             WHERE m.name = :name AND (m.is_visible_all = 1 OR g.user_id IS NOT NULL)',
+             WHERE m.name = :name AND (m.is_visible_all = 1 OR g.user_id IS NOT NULL OR m.owner_user_id = :uid)',
             [':uid' => $user->id, ':name' => $mountName]
         );
         if ($row === null) {
@@ -71,6 +72,8 @@ final class StorageManager
             'sftp' => new SftpAdapter(ConnectionService::decryptForAdapter($mount), $mount->readOnly),
             'smb' => new SmbAdapter(ConnectionService::decryptForAdapter($mount), $mount->readOnly),
             'http' => new HttpAdapter(ConnectionService::decryptForAdapter($mount), $mount->readOnly),
+            // S3 and every S3-compatible provider (R2, MinIO, Wasabi, B2, …).
+            's3' => new S3Adapter(ConnectionService::decryptForAdapter($mount), $mount->readOnly),
             default => throw new RuntimeException('Unknown adapter: ' . $mount->adapter),
         };
     }

@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(username,
 CREATE TABLE IF NOT EXISTS connections (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT NOT NULL UNIQUE,
-    protocol     TEXT NOT NULL CHECK (protocol IN ('ftp','ftps','sftp','smb','http')),
+    protocol     TEXT NOT NULL CHECK (protocol IN ('ftp','ftps','sftp','smb','http','s3')),
     host         TEXT NOT NULL,
     port         INTEGER NOT NULL,
     username     TEXT NOT NULL DEFAULT '',
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS mounts (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     name           TEXT NOT NULL UNIQUE,   -- slug used by the API ("local", "nas")
     label          TEXT NOT NULL,
-    adapter        TEXT NOT NULL CHECK (adapter IN ('local','ftp','ftps','sftp','smb','http')),
+    adapter        TEXT NOT NULL CHECK (adapter IN ('local','ftp','ftps','sftp','smb','http','s3')),
     local_root     TEXT,                   -- for local adapter only
     connection_id  INTEGER REFERENCES connections(id) ON DELETE SET NULL,
     remote_path    TEXT NOT NULL DEFAULT '/',
@@ -60,6 +60,9 @@ CREATE TABLE IF NOT EXISTS mounts (
     is_visible_all INTEGER NOT NULL DEFAULT 0,
     trash_enabled  INTEGER NOT NULL DEFAULT 1,
     created_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    -- Who owns this drive. NULL = admin-managed / shared. A non-NULL owner is a
+    -- personal drive: only that user (and admins) can see, rename or remove it.
+    owner_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -99,15 +102,42 @@ CREATE TABLE IF NOT EXISTS favorites (
 );
 
 CREATE TABLE IF NOT EXISTS recent_files (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    mount     TEXT NOT NULL,
-    path      TEXT NOT NULL,
-    name      TEXT NOT NULL,
-    action    TEXT NOT NULL DEFAULT 'open',
-    at        TEXT NOT NULL DEFAULT (datetime('now'))
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mount       TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    action      TEXT NOT NULL DEFAULT 'open',
+    type        TEXT NOT NULL DEFAULT 'file',
+    modified_at INTEGER NOT NULL DEFAULT 0,
+    size        INTEGER NOT NULL DEFAULT 0,
+    at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_recent_user ON recent_files(user_id, at DESC);
+
+-- Share links. The public token is never stored in the clear: `token_hash` is
+-- what lookups use, and `token_enc` (AES-GCM under APP_KEY) is only decrypted to
+-- re-display the link to its owner. A stolen database therefore yields neither
+-- a working link nor a usable credential.
+CREATE TABLE IF NOT EXISTS shares (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash      TEXT NOT NULL UNIQUE,
+    token_enc       TEXT NOT NULL,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mount           TEXT NOT NULL,
+    path            TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    is_dir          INTEGER NOT NULL DEFAULT 0,
+    password_hash   TEXT,
+    expires_at      TEXT,
+    allow_download  INTEGER NOT NULL DEFAULT 1,
+    revoked_at      TEXT,
+    access_count    INTEGER NOT NULL DEFAULT 0,
+    last_access_at  TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_shares_user ON shares(user_id);
+CREATE INDEX IF NOT EXISTS idx_shares_lookup ON shares(token_hash);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

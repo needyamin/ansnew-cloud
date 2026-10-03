@@ -21,6 +21,8 @@ final class Mount
         public readonly bool $readOnly,
         public readonly bool $trashEnabled,
         public readonly bool $canWrite,
+        /** Owner of a personal drive; NULL for an admin-managed/shared drive. */
+        public readonly ?int $ownerUserId = null,
     ) {
     }
 
@@ -39,7 +41,14 @@ final class Mount
             (bool) ($row['is_readonly'] ?? false),
             (bool) ($row['trash_enabled'] ?? true),
             !((bool) ($row['is_readonly'] ?? false)) && (bool) ($grant['can_write'] ?? true),
+            isset($row['owner_user_id']) && $row['owner_user_id'] !== null ? (int) $row['owner_user_id'] : null,
         );
+    }
+
+    /** Is this a personal drive belonging to `$userId`? */
+    public function isOwnedBy(int $userId): bool
+    {
+        return $this->ownerUserId !== null && $this->ownerUserId === $userId;
     }
 
     public function publicInfo(): array
@@ -53,6 +62,8 @@ final class Mount
             'canWrite' => $this->canWrite,
             'quotaBytes' => $this->quotaBytes,
             'trashEnabled' => $this->trashEnabled,
+            // Lets the UI offer rename/disconnect only where it is allowed.
+            'owned' => $this->ownerUserId !== null,
         ];
     }
 }

@@ -6,9 +6,9 @@
  * split panes, context menus and the background-job drawer.
  */
 
-import { el, clear, fmtSize } from './util.js';
+import { el, clear, fmtSize, fmtDate } from './util.js';
 import { api, setCsrf, clearCache, invalidate } from './api.js';
-import { state, saveSession, setTheme } from './state.js';
+import { state, saveSession, setTheme, setFavorites, isFavorite, setSidebarCollapsed } from './state.js';
 import { loadSprite, icon } from './icons.js';
 import { toast, toastOk, toastErr, toastWarn, dialog, confirmDialog, promptDialog } from './ui.js';
 import { FilesPane } from './filespane.js';
@@ -25,6 +25,7 @@ import { runUploadsWithUI } from './uploadtray.js';
 import { abortAllUploads } from './upload.js';
 import { runOp, joinPath, dirOf, syntheticEntry, reportBatch, resolveJob } from './mutation.js';
 import { initFsWatch } from './fswatch.js';
+import { renderDrivesView } from './drives.js';
 
 const root = document.getElementById('app');
 
@@ -35,6 +36,7 @@ let view = 'files';       // files | trash | admin-users | admin-mounts | admin-
 let menuNode = null;      // open context menu
 let shellNodes = {};      // cached shell DOM refs
 let uploadInput = null;
+let folderInput = null;
 let watchTimers = new Map();
 let shellListenersBound = false;
 
@@ -138,6 +140,8 @@ function startApp() {
     }
   });
   initFsWatch();
+  // Another tab/session adding or renaming a drive must show up here too.
+  rt.on('drives.changed', () => refreshSidebarData());
   rt.connect();
   // Mounts/favorites/recent must exist before the sidebar can render, so load
   // them first and only then build the shell.
@@ -201,7 +205,36 @@ function renderShell() {
 
 function buildSidebar() {
   const sb = el('div', { class: 'sidebar' });
-  sb.appendChild(el('div', { class: 'side-head' }, icon('drive'), 'ANSNEW CLOUD'));
+
+  /** Icon-only rail. The class is a no-op under the drawer breakpoint. */
+  const collapseBtn = el('button', {
+    class: 'btn icon sm only-wide sidebar-toggle',
+    title: 'Collapse sidebar (Ctrl+B)',
+    'aria-label': 'Collapse sidebar',
+    'aria-expanded': 'true',
+  }, icon('panel'));
+
+  const applyCollapsed = () => {
+    sb.classList.toggle('collapsed', state.sidebarCollapsed);
+    const label = state.sidebarCollapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)';
+    collapseBtn.title = label;
+    collapseBtn.setAttribute('aria-label', label);
+    collapseBtn.setAttribute('aria-expanded', state.sidebarCollapsed ? 'false' : 'true');
+  };
+
+  const toggleCollapse = () => {
+    setSidebarCollapsed(!state.sidebarCollapsed);
+    applyCollapsed();
+  };
+  collapseBtn.addEventListener('click', toggleCollapse);
+  sb.toggleCollapse = toggleCollapse;
+
+  const head = el('div', { class: 'side-head' },
+    icon('drive'),
+    el('span', { class: 'brand', text: 'ANSNEW CLOUD' }),
+    collapseBtn,
+  );
+  sb.appendChild(head);
 
   // One delegated listener closes the overlay drawer whenever a sidebar entry
   // navigates — cheaper and less error-prone than patching every click handler.
@@ -214,7 +247,8 @@ function buildSidebar() {
   const render = () => {
     clear(sb);
     mountButtons.clear();
-    sb.appendChild(el('div', { class: 'side-head' }, icon('drive'), 'ANSNEW CLOUD'));
+    sb.appendChild(head);
+    applyCollapsed();
 
     sb.appendChild(el('div', { class: 'side-sec' }, 'Locations'));
     if (!state.mounts.length) {
@@ -244,23 +278,37 @@ function buildSidebar() {
     }
 
     const recent = state.recent || [];
-    sb.appendChild(el('div', { class: 'side-sec' }, 'Recent'));
+    const recentHead = el('div', { class: 'side-sec side-sec-row' }, 'Recent');
+    if (recent.length) {
+      const more = el('button', { class: 'link-btn', title: 'Show all recent items', text: 'All' });
+      more.addEventListener('click', (e) => { e.stopPropagation(); showView('recent'); });
+      recentHead.appendChild(more);
+    }
+    sb.appendChild(recentHead);
     if (!recent.length) {
       sb.appendChild(el('div', { class: 'side-item' }, el('span', { class: 'lbl muted', text: 'No recent files' })));
     }
     for (const r of recent.slice(0, 6)) {
-      const btn = el('button', { class: 'side-item', title: r.mount + ':' + r.path },
-        icon('clock', 'ico'), el('span', { class: 'lbl', text: r.name || r.path }));
-      btn.addEventListener('click', () => navigateTo(r.mount, r.path.replace(/\/[^/]*$/, '') || '/'));
+      const btn = el('button', {
+        class: 'side-item',
+        title: `${r.name || r.path}\n${r.mount}:${r.path}\n${recentActionLabel(r.action)} · ${fmtDate(sqlDateToUnix(r.at))}`,
+      },
+        icon(recentIcon(r), 'ico'),
+        el('span', { class: 'lbl', text: r.name || r.path }));
+      btn.addEventListener('click', () => openRecent(r));
       sb.appendChild(btn);
     }
 
     sb.appendChild(el('div', { class: 'side-sec' }, 'Tools'));
+    // `title` matters when the sidebar is collapsed to an icon rail.
     const mkTool = (ico, label, fn) => {
-      const b = el('button', { class: 'side-item' }, icon(ico, 'ico'), el('span', { class: 'lbl', text: label }));
+      const b = el('button', { class: 'side-item', title: label },
+        icon(ico, 'ico'), el('span', { class: 'lbl', text: label }));
       b.addEventListener('click', fn);
       return b;
     };
+    sb.appendChild(mkTool('drive', 'Drives', () => showView('drives')));
+    sb.appendChild(mkTool('clock', 'Recent', () => showView('recent')));
     sb.appendChild(mkTool('trash', 'Trash', () => showView('trash')));
     sb.appendChild(mkTool('job', 'Background jobs', () => openJobs()));
     sb.appendChild(mkTool('info', 'Storage usage', () => usageDialog()));
@@ -318,6 +366,9 @@ function buildTopbar() {
   const up = el('button', { class: 'btn', title: 'Upload files (Ctrl+U)' }, icon('up'), el('span', { class: 'lbl', text: 'Upload' }));
   up.addEventListener('click', () => pickUpload());
   tb.appendChild(up);
+
+  const upFolder = mk('folder-plus', 'Upload a whole folder (keeps its structure)', () => pickUploadFolder());
+  tb.appendChild(wide(upFolder));
 
   tb.appendChild(el('span', { class: 'spacer' }));
 
@@ -377,7 +428,19 @@ function buildTopbar() {
       { label: state.user.displayName || state.user.username, disabled: true },
       { sep: true },
       { label: 'Change password', icon: 'edit', onClick: () => changePassword(false) },
-      { label: 'Reload app data', icon: 'refresh', onClick: () => refreshSidebarData() },
+      {
+        label: 'Reload app data', icon: 'refresh',
+        onClick: () => {
+          // A reload that served cached values would not be a reload.
+          invalidate('mounts');
+          invalidate('favorites');
+          invalidate('recent');
+          invalidate('drives');
+          invalidate('list:');
+          refreshSidebarData();
+          repaintPanes();
+        },
+      },
       { sep: true },
       { label: 'Sign out', icon: 'logout', danger: true, onClick: logout },
     ]);
@@ -453,6 +516,8 @@ function showView(name) {
   destroyPanes();
   clear(c);
   if (name === 'trash') renderTrash(c);
+  else if (name === 'recent') renderRecent(c);
+  else if (name === 'drives') renderDrivesView(c, { onChanged: onDrivesChanged });
   else if (name === 'admin-users') renderAdminUsers(c);
   else if (name === 'admin-mounts') renderAdminMounts(c);
   else if (name === 'admin-connections') renderAdminConnections(c);
@@ -498,11 +563,7 @@ function renderFiles() {
     onDownload: (p, entries) => p && downloadEntries(p, entries),
     onRename: (p, entry) => p && renameEntry(p, entry),
     onDelete: (p, entries) => p && deleteEntries(p, entries),
-    onToggleFavorite: async (entry, p) => {
-      if (!p) return;
-      await toggleFavorite(p.loc.mount, entry.path, entry.name);
-      await refreshSidebarData();
-    },
+    onToggleFavorite: (entry, p) => { if (p) toggleFavouriteFor(p, entry); },
   });
   split.appendChild(details.root);
   details.root.hidden = !state.detailsOpen;
@@ -521,7 +582,10 @@ function wirePane(p, secondary) {
     tab.history.push({ mount: loc.mount, path: loc.path });
     tab.histIdx = tab.history.length - 1;
     renderTabs();
-    recordRecent(loc.mount, loc.path);
+    // Navigating always lands on a directory, so the type is known here even
+    // though there is no listing entry to hand over.
+    recordRecent(loc.mount, loc.path,
+      { name: loc.path.split('/').filter(Boolean).pop() || loc.mount, type: 'dir' }, 'open');
   };
   p.onSelection = () => {
     if (secondary) return;
@@ -539,6 +603,11 @@ function wirePane(p, secondary) {
   p.onNewFolder = (inst) => newFolder(inst);
   p.onNewFile = (inst) => newFile(inst);
   p.onUpload = (inst) => pickUpload(inst);
+  p.onToggleFavorite = (inst, entry) => toggleFavouriteFor(inst, entry);
+  p.onOpenEntry = (inst, entry) => {
+    // Navigating into a folder is already recorded by onNavigate.
+    if (entry.type !== 'dir') recordRecent(inst.loc.mount, entry.path, entry, 'preview');
+  };
 }
 
 /** Create the secondary pane in place, keeping the details panel last. */
@@ -581,20 +650,42 @@ function updateSidebarActive() {
  * navigation, including the ones caused by breadcrumb clicks and tab switches.
  */
 let recentTimer = null;
-let lastRecent = { key: '', at: 0 };
+const recentSeen = new Map();   // key -> timestamp
 
-function recordRecent(mount, path) {
-  if (path === '/') return;
-  const key = mount + ':' + path;
+/**
+ * Record something in the Recent list.
+ *
+ * @param {string} mount
+ * @param {string} path
+ * @param {object|null} entry   listing entry, when we have one (for metadata)
+ * @param {string} action       open | preview | download | upload | create
+ */
+export function recordRecent(mount, path, entry = null, action = 'open') {
+  if (!mount || !path || path === '/') return;
+  const key = `${mount}:${path}:${action}`;
   const now = Date.now();
-  if (key === lastRecent.key && now - lastRecent.at < 60000) return;
-  lastRecent = { key, at: now };
+  // Collapse repeats of the same action within a minute; the server also
+  // upserts per path, so the list stays a list of places, not of events.
+  const seen = recentSeen.get(key);
+  if (seen && now - seen < 60000) return;
+  recentSeen.set(key, now);
+  if (recentSeen.size > 200) {
+    for (const [k, t] of recentSeen) if (now - t > 600000) recentSeen.delete(k);
+  }
+
+  const name = (entry && entry.name) || path.split('/').filter(Boolean).pop() || path;
   clearTimeout(recentTimer);
   recentTimer = setTimeout(() => {
     api.post('/api/recent', {
-      mount, path, name: path.split('/').filter(Boolean).pop(), action: 'open',
+      mount,
+      path,
+      name,
+      action,
+      type: entry && entry.type === 'dir' ? 'dir' : 'file',
+      modifiedAt: (entry && entry.mtime) || 0,
+      size: (entry && entry.size) || 0,
     }).then(() => invalidate('recent')).catch(() => { /* non-critical */ });
-  }, 1500);
+  }, 1200);
 }
 
 /* ------------------------------------------------------------ context menu */
@@ -644,7 +735,7 @@ function entryMenu(e, entry, inst) {
   if (!many) {
     items.push({ label: entry.type === 'dir' ? 'Open' : 'Preview', icon: 'folder', onClick: () => inst.open(entry) });
     if (entry.type !== 'dir') {
-      items.push({ label: 'Download', icon: 'download', onClick: () => { triggerDownload(inst.loc.mount, entry.path); recordRecent(inst.loc.mount, entry.path); } });
+      items.push({ label: 'Download', icon: 'download', onClick: () => { triggerDownload(inst.loc.mount, entry.path); recordRecent(inst.loc.mount, entry.path, entry, 'download'); } });
     } else {
       items.push({ label: 'Download as ZIP', icon: 'download', onClick: () => { downloadFolder(inst.loc.mount, entry.path); openJobs(); } });
     }
@@ -658,7 +749,14 @@ function entryMenu(e, entry, inst) {
     { label: 'Rename', icon: 'edit', disabled: many || !writable, onClick: () => renameEntry(inst, entry) },
     { label: 'Compress to ZIP', icon: 'archive', onClick: () => compress(inst, target) },
     { label: 'Extract here', icon: 'archive', disabled: many || entry.type === 'dir', onClick: () => extract(inst, entry) },
-    { label: 'Add to favorites', icon: 'star', disabled: many, onClick: async () => { await toggleFavorite(inst.loc.mount, entry.path, entry.name); await refreshSidebarData(); } },
+    {
+      // Reflect the actual state — this used to always read "Add to favorites",
+      // so clicking it on a favourited item silently removed it.
+      label: isFavorite(inst.loc.mount, entry.path) ? 'Remove from favourites' : 'Add to favourites',
+      icon: isFavorite(inst.loc.mount, entry.path) ? 'star' : 'star-outline',
+      disabled: many,
+      onClick: () => toggleFavouriteFor(inst, entry),
+    },
     { sep: true },
     { label: 'Delete', icon: 'trash', danger: true, disabled: !writable, onClick: () => deleteEntries(inst, target) },
   );
@@ -670,6 +768,7 @@ function backgroundMenu(e, inst) {
     { label: 'New folder', icon: 'plus', onClick: () => newFolder(inst) },
     { label: 'New file', icon: 'edit', onClick: () => newFile(inst) },
     { label: 'Upload files…', icon: 'up', onClick: () => pickUpload(inst) },
+    { label: 'Upload folder…', icon: 'folder-plus', onClick: () => pickUploadFolder(inst) },
     { sep: true },
     { label: 'Paste', icon: 'paste', disabled: !state.clipboard, onClick: () => pasteInto(inst) },
     { sep: true },
@@ -868,17 +967,189 @@ async function pasteInto(inst) {
 function pickUpload(inst = pane) {
   if (!inst) return;
   if (!uploadInput) {
-    uploadInput = el('input', { type: 'file', multiple: true, style: 'display:none' });
+    uploadInput = el('input', { type: 'file', multiple: true, class: 'upload-input', style: 'display:none' });
     document.body.appendChild(uploadInput);
   }
   uploadInput.onchange = () => {
     const files = [...uploadInput.files];
     uploadInput.value = '';
     if (!files.length) return;
-    // Hand over the pane so the incoming files show up immediately.
-    runUploadsWithUI(files, inst.loc.mount, inst.loc.path, 'rename', inst);
+    startUpload(files, inst, null);
   };
   uploadInput.click();
+}
+
+/**
+ * Pick a whole folder. `webkitdirectory` makes the browser hand over every file
+ * beneath it together with a relative path, which is what lets the server
+ * recreate the nested structure.
+ */
+function pickUploadFolder(inst = pane) {
+  if (!inst) return;
+  if (!folderInput) {
+    folderInput = el('input', {
+      type: 'file', multiple: true, webkitdirectory: 'true', directory: 'true',
+      class: 'folder-input', style: 'display:none',
+    });
+    document.body.appendChild(folderInput);
+  }
+  folderInput.onchange = () => {
+    const files = [...folderInput.files];
+    folderInput.value = '';
+    if (!files.length) return;
+    startUpload(files, inst, (f) => f.webkitRelativePath || f.name);
+  };
+  folderInput.click();
+}
+
+/**
+ * Upload a batch into the pane's current folder.
+ *
+ * @param {File[]} files
+ * @param {FilesPane} inst
+ * @param {?Function} relPathFor  returns the path relative to the chosen folder
+ */
+function startUpload(files, inst, relPathFor) {
+  const mount = inst.loc.mount;
+  const dir = inst.loc.path;
+  const folderCount = relPathFor
+    ? new Set(files.map((f) => String(relPathFor(f)).split('/').slice(0, -1).join('/')).filter(Boolean)).size
+    : 0;
+  if (folderCount) toast(`Uploading ${files.length} file(s) in ${folderCount} folder(s)…`, 'info');
+
+  // Hand over the pane so the incoming files show up immediately; the promise
+  // resolves with the files the server actually created.
+  return runUploadsWithUI(files, mount, dir, 'rename', inst, relPathFor ? { relPathFor } : {})
+    .then((results) => {
+      for (const r of results || []) recordRecent(mount, r.path, { name: r.name, size: r.size }, 'upload');
+      return results;
+    });
+}
+
+/* ---------------------------------------------------------- recent browser */
+
+/** Icon that reflects what the user did with the item. */
+function recentIcon(r) {
+  switch (r.action) {
+    case 'download': return 'download';
+    case 'upload': return 'up';
+    case 'create': return 'plus';
+    case 'preview': return r.type === 'dir' ? 'folder' : 'file';
+    default: return r.type === 'dir' ? 'folder' : 'clock';
+  }
+}
+
+function recentActionLabel(action) {
+  switch (action) {
+    case 'download': return 'Downloaded';
+    case 'upload': return 'Uploaded';
+    case 'create': return 'Created';
+    case 'preview': return 'Opened';
+    default: return 'Visited';
+  }
+}
+
+/** SQLite stores `datetime('now')` as "YYYY-MM-DD HH:MM:SS" in UTC. */
+function sqlDateToUnix(value) {
+  if (!value) return 0;
+  const ms = Date.parse(String(value).replace(' ', 'T') + 'Z');
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
+}
+
+/**
+ * Open a recent item. Folders navigate straight there; files open their
+ * containing folder, then select and scroll to the file so the user can see
+ * where it lives.
+ */
+function openRecent(r) {
+  if (!r) return;
+  if (r.type === 'dir') { navigateTo(r.mount, r.path); return; }
+  navigateTo(r.mount, dirOf(r.path));
+  revealEntryWhenReady(r.mount, r.path, 14);
+}
+
+function revealEntryWhenReady(mount, path, tries) {
+  const p = pane;
+  if (!p || p.destroyed || p.loc.mount !== mount) return;
+  const entry = p.entryByPath(path);
+  if (entry) {
+    p.selectOnly(entry);
+    const idx = p.indexByPath.get(path);
+    if (idx !== undefined) p.scrollToIndex(idx);
+    return;
+  }
+  if (tries > 0) setTimeout(() => revealEntryWhenReady(mount, path, tries - 1), 250);
+}
+
+async function renderRecent(c) {
+  const page = el('div', { class: 'admin-page' }, el('h2', {}, 'Recent'));
+  const toolbar = el('div', { class: 'admin-toolbar' });
+  const clearBtn = el('button', { class: 'btn danger' }, icon('trash'), 'Clear recent list');
+  clearBtn.addEventListener('click', async () => {
+    const ok = await confirmDialog('Clear your entire recent list? This only affects this list, not your files.',
+      { title: 'Clear recent', danger: true, okLabel: 'Clear list' });
+    if (!ok) return;
+    try {
+      await api.delete('/api/recent');
+      invalidate('recent');
+      state.recent = [];
+      toastOk('Recent list cleared');
+      if (shellNodes.sidebar && shellNodes.sidebar.render) shellNodes.sidebar.render();
+      showView('recent');
+    } catch (e) { toastErr(e.message); }
+  });
+  toolbar.appendChild(clearBtn);
+  page.appendChild(toolbar);
+
+  let items = [];
+  try {
+    const r = await api.get('/api/recent?limit=100', { cacheKey: 'recent-all', ttl: 10000 });
+    items = r.recent || [];
+  } catch (e) { toastErr(e.message); }
+
+  if (!items.length) {
+    page.appendChild(el('div', { class: 'empty-state' },
+      icon('clock', 'empty-ico'),
+      el('div', { class: 'empty-title', text: 'Nothing recent yet' }),
+      el('div', { class: 'empty-sub muted', text: 'Files and folders you open, upload or download will show up here.' }),
+    ));
+    c.appendChild(page);
+    return;
+  }
+
+  const table = el('table', { class: 'table' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Name'),
+      el('th', {}, 'Type'),
+      el('th', {}, 'Drive'),
+      el('th', {}, 'Action'),
+      el('th', {}, 'Modified'),
+      el('th', {}, 'Last used'),
+    )),
+  );
+  const tbody = el('tbody');
+  for (const r of items) {
+    const open = el('button', { class: 'link-btn', text: r.name || r.path, title: r.path });
+    open.addEventListener('click', () => openRecent(r));
+    const row = el('tr', {},
+      el('td', {}, icon(recentIcon(r), 'ico'), open),
+      el('td', { class: 'muted', text: r.type === 'dir' ? 'Folder' : 'File' }),
+      el('td', { class: 'muted', text: mountLabel(r.mount) }),
+      el('td', { class: 'muted', text: recentActionLabel(r.action) }),
+      el('td', { class: 'muted', text: r.modified_at ? fmtDate(Number(r.modified_at)) : '—' }),
+      el('td', { class: 'muted', text: fmtDate(sqlDateToUnix(r.at)) }),
+    );
+    tbody.appendChild(row);
+  }
+  table.appendChild(tbody);
+  page.appendChild(tableWrap(table));
+  c.appendChild(page);
+}
+
+/** Friendly name for a mount slug. */
+function mountLabel(name) {
+  const m = (state.mounts || []).find((x) => x.name === name);
+  return m ? (m.label || m.name) : name;
 }
 
 /* ----------------------------------------------------------- trash browser */
@@ -1345,10 +1616,57 @@ async function refreshSidebarData() {
       api.get('/api/recent?limit=8', { cacheKey: 'recent', ttl: 30000 }),
     ]);
     state.mounts = m.mounts || [];
-    state.favorites = f.favorites || [];
+    setFavorites(f.favorites || []);     // also rebuilds the favouriteKeys lookup
     state.recent = r.recent || [];
     if (shellNodes.sidebar && shellNodes.sidebar.render) shellNodes.sidebar.render();
+    // Favourite state is drawn on the rows, so they need repainting too.
+    repaintPanes();
   } catch (_) { /* ignore */ }
+}
+
+/** Re-apply row decorations (favourite stars, pending/failed) to every pane. */
+function repaintPanes() {
+  for (const p of state.panes) p.refreshDecorations();
+}
+
+/** A drive was added, renamed or disconnected — rebuild the sidebar + tabs. */
+async function onDrivesChanged() {
+  // Drop the cached sidebar data first: without this the refresh below would be
+  // served from the 30s mount cache and the new drive would not appear.
+  invalidate('mounts');
+  invalidate('drives');
+  await refreshSidebarData();
+  // If the active tab pointed at a drive that just disappeared, fall back.
+  const tab = currentTab();
+  if (tab && !state.mounts.some(m => m.name === tab.mount)) {
+    if (state.mounts.length) {
+      tab.mount = state.mounts[0].name;
+      tab.path = '/';
+      tab.history = [];
+      tab.histIdx = -1;
+      if (view === 'files') renderFiles();
+    }
+  }
+  renderTabs();
+}
+
+/**
+ * Toggle a favourite and make every surface agree: the row star, the details
+ * panel, and the sidebar list. Previously only the sidebar was refreshed, so
+ * the button the user just clicked kept its old appearance.
+ */
+async function toggleFavouriteFor(inst, entry) {
+  const mount = inst ? inst.loc.mount : '';
+  if (!mount || !entry) return;
+  try {
+    await toggleFavorite(mount, entry.path, entry.name);
+  } catch (e) {
+    toastErr(e.message);
+    return;
+  }
+  repaintPanes();
+  if (details) details.update(inst);
+  if (shellNodes.sidebar && shellNodes.sidebar.render) shellNodes.sidebar.render();
 }
 
 async function usageDialog() {
@@ -1485,6 +1803,11 @@ function globalKeys(e) {
   if (view !== 'files' || !pane) return;
   const mod = e.ctrlKey || e.metaKey;
   if (e.key === 'F5') { e.preventDefault(); pane.refresh(); return; }
+  if (mod && e.key.toLowerCase() === 'b') {
+    e.preventDefault();
+    if (shellNodes.sidebar && shellNodes.sidebar.toggleCollapse) shellNodes.sidebar.toggleCollapse();
+    return;
+  }
   if (mod && e.key.toLowerCase() === 'c') { e.preventDefault(); const s = pane.selectedEntries(); if (s.length) { state.clipboard = { mode: 'copy', items: s.map(t => ({ mount: pane.loc.mount, path: t.path, name: t.name, isDir: t.type === 'dir' })) }; toastOk(`Copied ${s.length}`); } return; }
   if (mod && e.key.toLowerCase() === 'x') { e.preventDefault(); const s = pane.selectedEntries(); if (s.length) { state.clipboard = { mode: 'cut', items: s.map(t => ({ mount: pane.loc.mount, path: t.path, name: t.name, isDir: t.type === 'dir' })) }; toastOk(`Cut ${s.length}`); } return; }
   if (mod && e.key.toLowerCase() === 'v') { e.preventDefault(); pasteInto(pane); return; }

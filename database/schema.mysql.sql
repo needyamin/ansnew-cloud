@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 CREATE TABLE IF NOT EXISTS connections (
     id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     name         VARCHAR(64)  NOT NULL UNIQUE,
-    protocol     ENUM('ftp','ftps','sftp','smb','http') NOT NULL,
+    protocol     ENUM('ftp','ftps','sftp','smb','http','s3') NOT NULL,
     host         VARCHAR(255) NOT NULL,
     port         INT          NOT NULL,
     username     VARCHAR(190) NOT NULL DEFAULT '',
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS mounts (
     id             BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     name           VARCHAR(64)  NOT NULL UNIQUE,
     label          VARCHAR(190) NOT NULL,
-    adapter        ENUM('local','ftp','ftps','sftp','smb','http') NOT NULL,
+    adapter        ENUM('local','ftp','ftps','sftp','smb','http','s3') NOT NULL,
     local_root     VARCHAR(1024) NULL,
     connection_id  BIGINT UNSIGNED NULL,
     remote_path    VARCHAR(1024) NOT NULL DEFAULT '/',
@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS mounts (
     is_visible_all TINYINT(1)   NOT NULL DEFAULT 0,
     trash_enabled  TINYINT(1)   NOT NULL DEFAULT 1,
     created_by     BIGINT UNSIGNED NULL,
+    -- Who owns this drive. NULL = admin-managed / shared.
+    owner_user_id  BIGINT UNSIGNED NULL,
     created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -102,15 +104,40 @@ CREATE TABLE IF NOT EXISTS favorites (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS recent_files (
-    id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    user_id BIGINT UNSIGNED NOT NULL,
-    mount   VARCHAR(64) NOT NULL,
-    path    VARCHAR(1024) NOT NULL,
-    name    VARCHAR(512) NOT NULL,
-    action  VARCHAR(32) NOT NULL DEFAULT 'open',
-    at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id     BIGINT UNSIGNED NOT NULL,
+    mount       VARCHAR(64) NOT NULL,
+    path        VARCHAR(1024) NOT NULL,
+    name        VARCHAR(512) NOT NULL,
+    action      VARCHAR(32) NOT NULL DEFAULT 'open',
+    type        VARCHAR(8) NOT NULL DEFAULT 'file',
+    modified_at BIGINT NOT NULL DEFAULT 0,
+    size        BIGINT NOT NULL DEFAULT 0,
+    at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_recent_user (user_id, at),
     CONSTRAINT fk_recent_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Share links. The public token is never stored in the clear: `token_hash` is
+-- what lookups use, and `token_enc` (AES-GCM under APP_KEY) is only decrypted to
+-- re-display the link to its owner.
+CREATE TABLE IF NOT EXISTS shares (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    token_hash      CHAR(64) NOT NULL UNIQUE,
+    token_enc       VARCHAR(255) NOT NULL,
+    user_id         BIGINT UNSIGNED NOT NULL,
+    mount           VARCHAR(64) NOT NULL,
+    path            VARCHAR(1024) NOT NULL,
+    name            VARCHAR(512) NOT NULL,
+    is_dir          TINYINT(1) NOT NULL DEFAULT 0,
+    password_hash   VARCHAR(255) NULL,
+    expires_at      DATETIME NULL,
+    allow_download  TINYINT(1) NOT NULL DEFAULT 1,
+    revoked_at      DATETIME NULL,
+    access_count    BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    last_access_at  DATETIME NULL,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_shares_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS audit_log (

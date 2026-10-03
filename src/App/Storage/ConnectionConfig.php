@@ -35,6 +35,50 @@ final class ConnectionConfig
     }
 
     /** @param array<string,mixed> $row */
+    /**
+     * Build a config from an unsaved request body.
+     *
+     * Used by the "test connection" button so a form can be validated before
+     * anything is written to the database. The secret is the raw value supplied
+     * by the caller and only ever lives in this process.
+     *
+     * @param array<string,mixed> $body
+     */
+    public static function fromDraft(array $body): self
+    {
+        $endpoint = trim((string) ($body['endpoint'] ?? $body['host'] ?? ''));
+        $host = $endpoint;
+        $port = (int) ($body['port'] ?? 0);
+        if (preg_match('~^https?://~i', $endpoint) === 1) {
+            $parts = parse_url($endpoint);
+            $host = (string) ($parts['host'] ?? '');
+            $port = isset($parts['port']) ? (int) $parts['port'] : 443;
+        }
+
+        $extra = [];
+        if (trim((string) ($body['protocol'] ?? '')) === 's3') {
+            $extra = [
+                'bucket' => trim((string) ($body['bucket'] ?? '')),
+                'region' => trim((string) ($body['region'] ?? '')) ?: 'us-east-1',
+                'path_style' => (bool) ($body['pathStyle'] ?? false),
+            ];
+        }
+
+        return new self(
+            (string) ($body['protocol'] ?? ''),
+            $host,
+            $port,
+            (string) ($body['accessKeyId'] ?? $body['username'] ?? ''),
+            (string) ($body['authType'] ?? 'password'),
+            (string) ($body['secretAccessKey'] ?? $body['secret'] ?? ''),
+            (string) ($body['passphrase'] ?? ''),
+            (string) ($body['remoteBase'] ?? '/'),
+            null,
+            (bool) ($body['verifyTls'] ?? true),
+            $extra,
+        );
+    }
+
     public static function fromRow(array $row): self
     {
         $extra = json_decode((string) ($row['extra'] ?? '{}'), true);
