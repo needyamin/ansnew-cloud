@@ -156,6 +156,13 @@ final class Database
             ['recent_files', 'type', "TEXT NOT NULL DEFAULT 'file'", "VARCHAR(8) NOT NULL DEFAULT 'file'"],
             ['recent_files', 'modified_at', 'INTEGER NOT NULL DEFAULT 0', 'BIGINT NOT NULL DEFAULT 0'],
             ['recent_files', 'size', 'INTEGER NOT NULL DEFAULT 0', 'BIGINT NOT NULL DEFAULT 0'],
+            // Two-factor authentication. The secret is encrypted at rest and
+            // recovery codes are stored as password hashes, never plaintext.
+            ['users', 'totp_secret_enc', 'TEXT', 'TEXT NULL'],
+            ['users', 'totp_enabled', 'INTEGER NOT NULL DEFAULT 0', 'TINYINT(1) NOT NULL DEFAULT 0'],
+            ['users', 'recovery_codes', "TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"],
+            // Folder or file — decides what clicking a favourite does.
+            ['favorites', 'type', "TEXT NOT NULL DEFAULT 'file'", "VARCHAR(8) NOT NULL DEFAULT 'file'"],
         ];
         foreach ($columns as [$table, $column, $sqliteDef, $mysqlDef]) {
             if ($this->hasColumn($table, $column)) {

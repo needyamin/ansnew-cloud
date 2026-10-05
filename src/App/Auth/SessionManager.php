@@ -41,6 +41,16 @@ final class SessionManager
         session_start();
         $this->started = true;
 
+        // Every session must be able to produce a CSRF token, including a brand
+        // new one. Without this, a client that has just logged out (or is
+        // visiting for the first time without a bootstrap call) cannot sign in:
+        // the kernel's mutating-request check found no token in the session and
+        // rejected the login itself, which is exactly the request CSRF exists to
+        // allow.
+        if (empty($_SESSION['_csrf'])) {
+            $_SESSION['_csrf'] = bin2hex(random_bytes(32));
+        }
+
         $now = time();
         $lastActivity = (int) ($_SESSION['_last_activity'] ?? 0);
         $created = (int) ($_SESSION['_created'] ?? 0);

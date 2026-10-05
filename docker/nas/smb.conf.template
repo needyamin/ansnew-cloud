@@ -1,0 +1,32 @@
+[global]
+   workgroup = WORKGROUP
+   server string = ANSNEW CLOUD NAS
+   netbios name = ANSNEW
+   security = user
+   map to guest = Never
+   passdb backend = tdbsam
+   smb encrypt = desired
+   server min protocol = SMB2
+   server max protocol = SMB3
+   log level = 1
+   # Files written over SMB are owned by ansnew (uid/gid 82) so the app and
+   # worker containers (also uid 82) can read and encrypt them.
+   force user = ansnew
+   force group = ansnew
+   create mask = 0664
+   directory mask = 0775
+   wide links = no
+   unix extensions = no
+
+[${NAS_SHARE_NAME}]
+   path = /srv/storage/local/_inbox
+   comment = ANSNEW CLOUD drop folder
+   browseable = yes
+   read only = no
+   writable = yes
+   valid users = ${NAS_USER}
+   guest ok = no
+   # Let the OS enforce permissions rather than Samba's own mode check. Needed so the
+   # share is writable on hosts (e.g. Docker Desktop on Windows) whose bind mounts
+   # don't honour Unix chmod; on Linux the dir is owned by the forced user anyway.
+   acl check permissions = no

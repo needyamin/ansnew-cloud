@@ -130,11 +130,21 @@ async function clickInRow(path, selector) {
 }
 
 const goRoot = async () => {
-  await evaluate(`(() => {
-    const item = [...document.querySelectorAll('.sidebar .side-item')].find(b => b.textContent.includes('Local Storage'));
-    if (item) item.click();
+  // Prefer the first breadcrumb: it is always the drive root. The sidebar entry
+  // depends on the drive's display name, which other suites can rename.
+  const viaCrumbs = await evaluate(`(() => {
+    const c = document.querySelector('.crumbs .crumb');
+    if (!c) return false;
+    c.click();
     return true;
   })()`);
+  if (!viaCrumbs) {
+    await evaluate(`(() => {
+      const item = [...document.querySelectorAll('.sidebar .side-item')].find(b => b.textContent.includes('Local Storage'));
+      if (item) item.click();
+      return true;
+    })()`);
+  }
   await sleep(1400);
 };
 
@@ -237,6 +247,13 @@ const login = async () => {
   await sleep(2600);
 };
 const reload = async () => { await send('Page.navigate', { url: BASE + '/' }); await sleep(3200); };
+/** Reload the CURRENT URL — that is what a browser reload does, and what a
+ *  deep link has to survive. */
+const reloadCurrent = async () => {
+  const href = await evaluate('window.location.href');
+  await send('Page.navigate', { url: href });
+  await sleep(3200);
+};
 
 const STAMP = Date.now();
 const FOLDER = `feat-${STAMP}`;
@@ -815,6 +832,247 @@ if (!ONLY) {
   });
   const cleaned = rm.body?.ok === true;
   check('fixture cleaned up', cleaned, JSON.stringify(rm.body).slice(0, 120));
+}
+
+/* ------------------------------------- url sync, empty state, shares, settings */
+if (section('urlshares')) {
+  const DIR = `urlstate-${STAMP}`;
+  await apiCall('/api/fs/local/mkdir', 'POST', { path: '/', name: DIR });
+  await apiCall('/api/fs/local/file', 'POST', { path: '/' + DIR, name: 'inside.txt' });
+  await refreshList();
+
+  // --- empty state: a folder with content must NOT claim to be empty ---
+  await revealRow('/' + DIR);
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('.filelist [data-path]')].find(e => e.dataset.path === ${JSON.stringify('/' + DIR)});
+    row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    return true;
+  })()`);
+  await sleep(1500);
+  const nonEmpty = await evaluate(`(() => {
+    const e = document.querySelector('.pane .empty-state, .empty-state');
+    const rows = document.querySelectorAll('.filelist [data-path]').length;
+    return { emptyVisible: !!e && e.offsetParent !== null, rows };
+  })()`);
+  check('folder with content renders its rows', nonEmpty.rows > 0, 'rows=' + nonEmpty.rows);
+  check('"This folder is empty" is NOT shown when the folder has content',
+    nonEmpty.emptyVisible === false, JSON.stringify(nonEmpty));
+
+  // ...and a genuinely empty folder must show it.
+  await apiCall('/api/fs/local/mkdir', 'POST', { path: '/' + DIR, name: 'void' });
+  await refreshList();
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('.filelist [data-path]')].find(e => e.dataset.path === ${JSON.stringify('/' + DIR + '/void')});
+    if (row) row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    return true;
+  })()`);
+  await sleep(1500);
+  const emptyCase = await evaluate(`(() => {
+    const e = document.querySelector('.pane .empty-state, .empty-state');
+    return { emptyVisible: !!e && e.offsetParent !== null, rows: document.querySelectorAll('.filelist [data-path]').length };
+  })()`);
+  check('"This folder is empty" IS shown for an empty folder', emptyCase.emptyVisible === true,
+    JSON.stringify(emptyCase));
+
+  // --- URL reflects the location and survives a reload ---
+  const urlNow = await evaluate(`window.location.search`);
+  check('the address bar carries the current folder',
+    urlNow.includes('mount=local') && urlNow.includes('path='), urlNow);
+
+  await reloadCurrent();
+  await sleep(2000);
+  const afterReload = await evaluate(`(() => {
+    const crumbs = document.querySelector('.crumbs')?.textContent || '';
+    return { crumbs, url: window.location.search, rows: document.querySelectorAll('.filelist [data-path]').length };
+  })()`);
+  check('reloading the URL reopens the same folder',
+    afterReload.url.includes('mount=local') && afterReload.crumbs.includes('void'),
+    JSON.stringify(afterReload));
+
+  // --- settings view ---
+  await evaluate(`(() => {
+    const b = [...document.querySelectorAll('.sidebar .side-item')].find(x => x.textContent.includes('Settings'));
+    if (b) b.click();
+    return true;
+  })()`);
+  await sleep(1400);
+  const settings = await evaluate(`(() => {
+    const cards = [...document.querySelectorAll('.settings-card h3')].map(h => h.textContent.trim());
+    return {
+      cards,
+      hasAccount: cards.some(c => /Account security/.test(c)),
+      hasSession: cards.some(c => /Session/.test(c)),
+      hasSharing: cards.some(c => /Sharing/.test(c)),
+      hasFiles: cards.some(c => /Files & uploads/.test(c)),
+      kvCount: document.querySelectorAll('.settings-card .kv').length,
+    };
+  })()`);
+  check('Settings shows the account security card', settings.hasAccount, JSON.stringify(settings.cards));
+  check('Settings shows the session card', settings.hasSession, JSON.stringify(settings.cards));
+  check('Settings shows the sharing card', settings.hasSharing, JSON.stringify(settings.cards));
+  check('Settings shows the files & uploads card', settings.hasFiles, JSON.stringify(settings.cards));
+  check('Settings lists concrete configured values', settings.kvCount >= 10, 'kv=' + settings.kvCount);
+
+  // --- shared links view ---
+  await evaluate(`(() => {
+    const b = [...document.querySelectorAll('.sidebar .side-item')].find(x => x.textContent.includes('Shared links'));
+    if (b) b.click();
+    return true;
+  })()`);
+  await sleep(1400);
+  const sharesView = await evaluate(`(() => {
+    const empty = document.querySelector('.admin-page .empty-state');
+    const table = document.querySelector('.admin-page table.table');
+    return { hasEmpty: !!empty, hasTable: !!table,
+             title: document.querySelector('.admin-page h2')?.textContent };
+  })()`);
+  check('Shared links view renders', sharesView.title === 'Shared links', JSON.stringify(sharesView));
+
+  // --- the context menu offers Share ---
+  await goRoot();
+  await refreshList();
+  await revealRow('/' + DIR);
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('.filelist [data-path]')].find(e => e.dataset.path === ${JSON.stringify('/' + DIR)});
+    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 300 }));
+    return true;
+  })()`);
+  await sleep(600);
+  const menuProbe = await evaluate(`(() => {
+    const btns = [...document.querySelectorAll('.ctxmenu button')];
+    return { n: btns.length, items: btns.map(b => b.textContent.trim()).slice(0, 20) };
+  })()`);
+  const hasShare = (menuProbe.items || []).some(t => t.includes('Share'));
+  check('the context menu offers Share', hasShare === true, JSON.stringify(menuProbe));
+  await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await sleep(300);
+
+  // --- clean up ---
+  await apiCall('/api/fs/local/delete-batch', 'POST', {
+    items: [{ path: '/' + DIR }], permanent: true,
+  });
+  await refreshList();
+}
+
+/* ------------------------------------- favourites, undo, move precision */
+if (section('uxfixes')) {
+  const DIR = `ux-${STAMP}`;
+  const FILE = `pinned-${STAMP}.txt`;
+  await apiCall('/api/fs/local/mkdir', 'POST', { path: '/', name: DIR });
+  await apiCall('/api/fs/local/file', 'POST', { path: '/' + DIR, name: FILE });
+  await refreshList();
+  await goRoot();
+
+  // --- pin a FILE and click it in the sidebar ---
+  await revealRow('/' + DIR);
+  await clickInRow('/' + DIR, '.row-actions .fav');
+  await sleep(700);
+  // navigate in, pin the file, come back out
+  await revealRow('/' + DIR);
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('.filelist [data-path]')].find(e => e.dataset.path === ${JSON.stringify('/' + DIR)});
+    row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    return true;
+  })()`);
+  await sleep(1300);
+  await revealRow('/' + DIR + '/' + FILE);
+  await clickInRow('/' + DIR + '/' + FILE, '.row-actions .fav');
+  await sleep(700);
+  await goRoot();
+  await sleep(900);
+
+  // Clicking the pinned FILE in the sidebar used to throw
+  // "Operation failed: Not a directory".
+  const clicked = await evaluate(`(() => {
+    const items = [...document.querySelectorAll('.sidebar .side-item')];
+    const btn = items.find(b => b.textContent.includes(${JSON.stringify(FILE.replace('.txt', ''))}));
+    if (!btn) return 'not-pinned';
+    btn.click();
+    return 'clicked';
+  })()`);
+  check('pinned file is clickable in the sidebar', clicked === 'clicked', clicked);
+  await sleep(1800);
+  const afterFileClick = await evaluate(`(() => {
+    const toast = [...document.querySelectorAll('.toast.err')].map(t => t.textContent).join(' | ');
+    const row = [...document.querySelectorAll('.filelist [data-path]')].find(e => e.dataset.path === ${JSON.stringify('/' + DIR + '/' + FILE)});
+    return { toast, crumbs: document.querySelector('.crumbs')?.textContent || '',
+             selected: row ? row.getAttribute('aria-selected') : 'absent' };
+  })()`);
+  check('no "Not a directory" error when opening a pinned file',
+    !/Not a directory/.test(afterFileClick.toast), afterFileClick.toast);
+  check('the parent folder of the pinned file opens',
+    afterFileClick.crumbs.includes(DIR), afterFileClick.crumbs);
+  check('the pinned file is selected', afterFileClick.selected === 'true',
+    JSON.stringify(afterFileClick));
+
+  // --- right-click a favourite offers "Remove from favourites" ---
+  await evaluate(`(() => {
+    const btn = [...document.querySelectorAll('.sidebar .side-item')].find(b => b.textContent.includes(${JSON.stringify(FILE.replace('.txt', ''))}));
+    btn.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 }));
+    return true;
+  })()`);
+  await sleep(600);
+  const menu = await evaluate(`(() => {
+    const items = [...document.querySelectorAll('.ctxmenu button')].map(b => b.textContent);
+    const remove = items.find(t => /Remove from favourites/i.test(t));
+    if (remove) [...document.querySelectorAll('.ctxmenu button')].find(b => b.textContent === remove).click();
+    return { items, remove: !!remove };
+  })()`);
+  check('right-clicking a favourite offers Remove', menu.remove === true, JSON.stringify(menu.items));
+  await sleep(900);
+  const stillPinned = await evaluate(`[...document.querySelectorAll('.sidebar .side-item')].some(b => b.textContent.includes(${JSON.stringify(FILE.replace('.txt', ''))}))`);
+  check('remove-from-favourites actually removes it', stillPinned === false);
+
+  // --- undo a delete ---
+  await refreshList();
+  await revealRow('/' + DIR + '/' + FILE);
+  await clickInRow('/' + DIR + '/' + FILE, '.row-actions .fav');
+  await sleep(400);
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('.filelist [data-path]')].find(e => e.dataset.path === ${JSON.stringify('/' + DIR + '/' + FILE)});
+    if (row) row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return true;
+  })()`);
+  await evaluate(`(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true })); return true; })()`);
+  await sleep(500);
+  await evaluate(`(() => {
+    const b = [...document.querySelectorAll('.overlay .dialog footer button, .dialog footer button')]
+      .find(x => /Move to trash/i.test(x.textContent));
+    if (b) b.click();
+    return true;
+  })()`);
+  await sleep(1600);
+  const undoBtn = await waitFor(`!!document.querySelector('.toast .toast-action')`, 6000, 200);
+  check('a delete offers Undo', undoBtn === true);
+  await evaluate(`(() => { const b = document.querySelector('.toast .toast-action'); if (b) b.click(); return true; })()`);
+  await sleep(2000);
+  const restored = await waitFor(
+    `[...document.querySelectorAll('.filelist [data-path]')].some(e => e.dataset.path === ${JSON.stringify('/' + DIR + '/' + FILE)})`,
+    8000, 250);
+  check('Undo restores the deleted file', restored === true);
+
+  // --- move precision: the server refuses a non-folder destination ---
+  // A second file is the destination, so this is genuinely "onto a file" and
+  // not the self-move guard.
+  await apiCall('/api/fs/local/file', 'POST', { path: '/' + DIR, name: 'other.txt' });
+  const badMove = await apiCall('/api/fs/local/move-batch', 'POST', {
+    items: [{ path: '/' + DIR + '/' + FILE }],
+    destDir: '/' + DIR + '/other.txt',    // a FILE, not a folder
+    destMount: 'local',
+  });
+  const refused = badMove.status >= 400 || (badMove.body?.data?.failed || []).length > 0;
+  check('moving onto a file is refused', refused === true,
+    JSON.stringify(badMove.body ?? { status: badMove.status }).slice(0, 160));
+  const stillThere = (await apiCall(`/api/fs/local/list?path=${encodeURIComponent('/' + DIR)}`)).body?.data?.entries || [];
+  check('nothing was moved or created by the refused move',
+    stillThere.some(e => e.path === '/' + DIR + '/' + FILE) && !stillThere.some(e => e.path.includes('a.txt/')),
+    JSON.stringify(stillThere.map(e => e.path)));
+
+  // --- cleanup ---
+  await apiCall('/api/fs/local/delete-batch', 'POST', {
+    items: [{ path: '/' + DIR }], permanent: true,
+  });
+  await refreshList();
 }
 
 console.log(`\nFEATURES RESULT: ${pass} passed, ${fail} failed`);

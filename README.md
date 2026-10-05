@@ -69,6 +69,24 @@ docker compose exec php php /var/www/app/bin/console.php ansnew:reset-password -
 You can also change your own password in the UI: click your avatar (top right) →
 **Change password**.
 
+## Destructive-action protection
+
+A logged-in session proves who you are, not that you meant to wipe something. The
+following actions ask for your password again before they run:
+
+- Disconnecting a drive
+- Deleting a storage connection (in Administration)
+- Emptying or purging the trash
+- Permanently deleting files (bypassing the trash)
+- Removing **all** favourites at once
+- Removing **all** shared links at once (revokes every share link you created)
+
+The confirmation mints a short-lived grant (60 s by default) held on the server,
+so the password prompt can't be skipped by the client. Deleting *to* the trash is
+also gated by default; an administrator can turn that specific prompt off in
+**Settings → Destructive-action protection** (`security.gate.delete_trash`), but
+permanent deletes are always gated.
+
 ---
 
 ## Configuration
@@ -163,6 +181,50 @@ including remote ones via **Connections** (FTP, FTPS, SFTP, SMB, WebDAV). Remote
 credentials are encrypted with `APP_KEY` and never sent to the browser.
 
 Local mounts are sandboxed to `/srv/storage/local`; paths cannot escape it.
+
+---
+
+## NAS (SMB) option
+
+Turn ANSNEW CLOUD into a LAN NAS so Windows "Map Network Drive" and mobile SMB apps
+can drop files straight into the file manager. This is **opt-in** — it adds two
+containers behind the `nas` compose profile and exposes a writable SMB share on
+TCP 445:
+
+```bash
+# one-shot
+docker compose --profile nas up -d
+
+# or make it permanent: set in .env
+COMPOSE_PROFILES=nas
+docker compose up -d
+```
+
+What happens:
+
+1. The `nas` container runs Samba and shares `<STORAGE_HOST_PATH>/_inbox` as
+   `\\<host>\ansnew` (default share name `ansnew`, auth `NAS_USER` / `NAS_PASS`).
+   Files written there land in the **same host directory** the app lists as the
+   `local` mount, so they show up in the file manager immediately under `_inbox`.
+2. The `nas-watch` container watches `_inbox` and imports each dropped file through
+   a **serialized, rate-limited queue**: when at-rest encryption is on
+   (`ANSNEW_ENCRYPT_LOCAL=1`) it encrypts the file in place, and aggregate
+   throughput is capped at `NAS_INGEST_MBPS` (default **50 MB/s**) so a big batch
+   can't saturate disk. Each import is recorded (so it runs exactly once) and
+   audited under the `nas.import` action.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `NAS_SHARE_NAME` | `ansnew` | SMB share name |
+| `NAS_USER` / `NAS_PASS` | `ansnew` / `change-me-in-production` | SMB login (set a real password!) |
+| `NAS_INGEST_MBPS` | `50` | Max import throughput, MB/s |
+| `NAS_PORT` | `445` | Host port for SMB (must be free — Samba isn't running on the Linux host) |
+
+> **Run the NAS role on a Linux Docker host.** SMB needs TCP 445; on a Windows/macOS
+> dev box that port is already taken by the OS's own SMB, so the container can't bind
+> it. On Linux it binds cleanly and other machines see it as a real NAS. Files written
+> over SMB are owned by uid/gid 82 (matching the app containers) so the app can read
+> and encrypt them.
 
 ---
 

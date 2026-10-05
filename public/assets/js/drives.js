@@ -12,6 +12,7 @@ import { api, invalidate } from './api.js';
 import { state } from './state.js';
 import { icon } from './icons.js';
 import { dialog, confirmDialog, toast, toastOk, toastErr } from './ui.js';
+import { ensureSensitive } from './sensitive.js';
 
 const TYPE_LABEL = {
   local: 'Local storage',
@@ -135,6 +136,9 @@ async function disconnectDrive(drive, onChanged) {
     { title: 'Disconnect drive', danger: true, okLabel: 'Disconnect' },
   );
   if (!ok) return;
+  // Password gate, enforced server-side by SensitiveGate (scope drive.disconnect).
+  const granted = await ensureSensitive('drive.disconnect');
+  if (!granted) return;
   try {
     const r = await api.delete(`/api/drives/${drive.id}`);
     invalidate('drives');

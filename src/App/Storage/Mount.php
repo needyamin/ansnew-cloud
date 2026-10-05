@@ -64,6 +64,10 @@ final class Mount
             'trashEnabled' => $this->trashEnabled,
             // Lets the UI offer rename/disconnect only where it is allowed.
             'owned' => $this->ownerUserId !== null,
+            // The permission map: what THIS account may do on this drive.
+            // $this->canWrite already folds the read-only flag and any per-user
+            // grant, so this is the single source the UI needs.
+            'capabilities' => \App\Auth\Policy::forMount($this->canWrite, false),
         ];
     }
 }

@@ -7,8 +7,11 @@
  */
 
 import { el, clear, fmtSize, fmtDate } from './util.js';
-import { api, setCsrf, clearCache, invalidate } from './api.js';
-import { state, saveSession, setTheme, setFavorites, isFavorite, setSidebarCollapsed } from './state.js';
+import { api, setCsrf, clearCache, invalidate, invalidateList } from './api.js';
+import {
+  state, saveSession, setTheme, setFavorites, isFavorite,
+  setSidebarCollapsed, setSensitivePolicy, setColumn,
+} from './state.js';
 import { loadSprite, icon } from './icons.js';
 import { toast, toastOk, toastErr, toastWarn, dialog, confirmDialog, promptDialog } from './ui.js';
 import { FilesPane } from './filespane.js';
@@ -26,6 +29,14 @@ import { abortAllUploads } from './upload.js';
 import { runOp, joinPath, dirOf, syntheticEntry, reportBatch, resolveJob } from './mutation.js';
 import { initFsWatch } from './fswatch.js';
 import { renderDrivesView } from './drives.js';
+import { twoFactorDialog } from './twofactor.js';
+import { shareDialog, renderSharesView } from './sharing.js';
+import { renderSettings } from './settings.js';
+import { withSensitive, ensureSensitive, isGated, resetGrants } from './sensitive.js';
+import { renderFavouritesView } from './favview.js';
+import { bulkRenameDialog } from './bulkrename.js';
+import { duplicatesDialog } from './duplicates.js';
+import { clearAllFavorites } from './fsops.js';
 
 const root = document.getElementById('app');
 
@@ -58,6 +69,9 @@ function tableWrap(table) {
   try {
     const b = await api.get('/api/bootstrap');
     setCsrf(b.csrf);
+    // Which destructive actions need a password, and for how long one
+    // confirmation lasts. Published by the server so the UI never hardcodes it.
+    setSensitivePolicy(b.sensitive);
     if (b.authenticated) {
       saveSession(b.user, b.csrf);
       startApp();
@@ -91,6 +105,11 @@ function renderLogin() {
     try {
       const r = await api.post('/api/auth/login', { username: user.value.trim(), password: pass.value });
       setCsrf(r.csrf);
+      if (r.twoFactorRequired) {
+        // The password alone must not reach the app: ask for the second factor.
+        showTwoFactorStep();
+        return;
+      }
       saveSession(r.user, r.csrf);
       startApp();
     } catch (e) {
@@ -101,6 +120,54 @@ function renderLogin() {
       btn.disabled = false;
       btn.textContent = 'Sign in';
     }
+  }
+
+  /**
+   * Second login step: the authenticator code, or a recovery code if the app
+   * is unavailable. The password fields are removed from the DOM entirely so no
+   * half-authenticated state can be resubmitted.
+   */
+  function showTwoFactorStep() {
+    err.textContent = '';
+    clear(root);
+    const title = el('h2', { class: 'login-title', text: 'Two-factor authentication' });
+    const hint = el('p', { class: 'muted login-hint', text: 'Enter the 6-digit code from your authenticator app, or a recovery code.' });
+    const code = el('input', {
+      type: 'text', placeholder: '123 456', autocomplete: 'one-time-code',
+      inputmode: 'numeric', maxlength: '40',
+    });
+    const stepErr = el('div', { class: 'err' });
+    const verifyBtn = el('button', { class: 'btn primary', text: 'Verify', style: 'justify-content:center' });
+    const backBtn = el('button', { class: 'btn ghost', text: 'Start over', style: 'justify-content:center' });
+
+    async function verify() {
+      stepErr.textContent = '';
+      if (!code.value.trim()) { stepErr.textContent = 'Enter a code.'; return; }
+      verifyBtn.disabled = true;
+      verifyBtn.textContent = 'Verifying…';
+      try {
+        const r = await api.post('/api/auth/2fa', { code: code.value.trim() });
+        setCsrf(r.csrf);
+        saveSession(r.user, r.csrf);
+        if (r.usedRecoveryCode) {
+          setTimeout(() => toast('You signed in with a recovery code. Consider regenerating them.', 'warn'), 600);
+        }
+        startApp();
+      } catch (e) {
+        stepErr.textContent = e.message;
+        code.value = '';
+        code.focus();
+      } finally {
+        verifyBtn.disabled = false;
+        verifyBtn.textContent = 'Verify';
+      }
+    }
+
+    code.addEventListener('keydown', (e) => { if (e.key === 'Enter') verify(); });
+    verifyBtn.addEventListener('click', verify);
+    backBtn.addEventListener('click', () => { renderLogin(); });
+    root.append(title, hint, code, stepErr, verifyBtn, backBtn);
+    setTimeout(() => code.focus(), 40);
   }
 
   for (const input of [user, pass]) {
@@ -195,7 +262,13 @@ function renderShell() {
   }
 
   if (!state.tabs.length && state.mounts.length) {
-    state.tabs.push({ id: 't' + Date.now(), mount: state.mounts[0].name, path: '/', history: [], histIdx: -1 });
+    // A shared/deep link in the URL wins over the default, as long as that
+    // mount is actually visible to this user.
+    const wanted = locationFromUrl();
+    const target = wanted && state.mounts.some(m => m.name === wanted.mount)
+      ? wanted
+      : { mount: state.mounts[0].name, path: '/' };
+    state.tabs.push({ id: 't' + Date.now(), mount: target.mount, path: target.path, history: [], histIdx: -1 });
     state.activeTab = 0;
   }
   showView('files');
@@ -266,14 +339,51 @@ function buildSidebar() {
     }
 
     const favs = state.favorites || [];
-    sb.appendChild(el('div', { class: 'side-sec' }, 'Favorites'));
+    // "All" opens the full page (the sidebar truncates at six); "Clear" empties
+    // the whole list behind a password. Both only make sense when there is
+    // something pinned, so they disappear with the list.
+    const favHead = el('div', { class: 'side-sec side-sec-row' }, 'Favorites');
+    if (favs.length) {
+      const all = el('button', { class: 'link-btn', title: 'Show all favourites', text: 'All' });
+      all.addEventListener('click', (e) => { e.stopPropagation(); showView('favourites'); });
+      const clear = el('button', { class: 'link-btn', title: 'Remove every favourite', text: 'Clear' });
+      clear.addEventListener('click', (e) => { e.stopPropagation(); clearAllFavourites(); });
+      favHead.append(all, clear);
+    }
+    sb.appendChild(favHead);
     if (!favs.length) {
       sb.appendChild(el('div', { class: 'side-item' }, el('span', { class: 'lbl muted', text: 'Nothing pinned yet' })));
     }
     for (const f of favs) {
-      const btn = el('button', { class: 'side-item', title: f.mount + ':' + f.path },
-        icon('star', 'ico'), el('span', { class: 'lbl', text: f.label || f.path }));
-      btn.addEventListener('click', () => navigateTo(f.mount, f.path));
+      const isDir = f.type === 'dir';
+      const btn = el('button', {
+        class: 'side-item',
+        title: `${f.label || f.path}\n${f.mount}:${f.path}\n${isDir ? 'Folder' : 'File'} — right-click for options`,
+      },
+        icon(isDir ? 'folder' : 'star', 'ico'),
+        el('span', { class: 'lbl', text: f.label || f.path }));
+      // A pinned FILE must not be opened as a folder: that produced
+      // "Operation failed: Not a directory". Instead open its folder and
+      // highlight the file, exactly like a search result.
+      btn.addEventListener('click', () => openFavourite(f));
+      // Right-click gives a way out without having to find the item again.
+      btn.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openMenu(e.clientX, e.clientY, [
+          { label: 'Open', icon: isDir ? 'folder' : 'file', onClick: () => openFavourite(f) },
+          {
+            label: 'Remove from favourites', icon: 'star', danger: true,
+            onClick: async () => {
+              try {
+                await toggleFavorite(f.mount, f.path, f.label);
+                invalidate('favorites');
+                await refreshSidebarData();
+              } catch (err) { toastErr(err.message); }
+            },
+          },
+        ]);
+      });
       sb.appendChild(btn);
     }
 
@@ -308,6 +418,8 @@ function buildSidebar() {
       return b;
     };
     sb.appendChild(mkTool('drive', 'Drives', () => showView('drives')));
+    sb.appendChild(mkTool('share', 'Shared links', () => showView('shares')));
+    sb.appendChild(mkTool('settings', 'Settings', () => showView('settings')));
     sb.appendChild(mkTool('clock', 'Recent', () => showView('recent')));
     sb.appendChild(mkTool('trash', 'Trash', () => showView('trash')));
     sb.appendChild(mkTool('job', 'Background jobs', () => openJobs()));
@@ -332,6 +444,43 @@ function buildSidebar() {
 }
 
 /**
+ * Open a pinned favourite.
+ *
+ * Folders navigate straight there. Files open the folder that contains them and
+ * then select the file — navigating to the file path itself fails with
+ * "Not a directory", which is what this used to do.
+ */
+/**
+ * Remove every favourite.
+ *
+ * Password-gated: it is a bulk, irreversible change to a list built up one
+ * click at a time, and there is no per-item undo.
+ */
+async function clearAllFavourites() {
+  const favs = state.favorites || [];
+  if (!favs.length) return;
+  const ok = await confirmDialog(
+    `Remove all ${favs.length} favourite(s)? Your files are not affected, but the whole list is cleared and cannot be restored.`,
+    { title: 'Remove all favourites', danger: true, okLabel: 'Remove all' },
+  );
+  if (!ok) return;
+  const res = await withSensitive('favorites.clear', async () => clearAllFavorites());
+  if (!res) return;   // undefined = the user cancelled the password prompt
+  setFavorites([]);
+  invalidate('favorites');
+  toastOk('All favourites removed');
+  await refreshSidebarData();
+  if (view === 'favourites') showView('favourites');
+}
+
+function openFavourite(f) {
+  if (!f) return;
+  if (f.type === 'dir') { navigateTo(f.mount, f.path); return; }
+  navigateTo(f.mount, dirOf(f.path));
+  revealEntryWhenReady(f.mount, f.path, 14);
+}
+
+/**
  * Jump the active tab to a location. Every sidebar entry used to call
  * showView('files') — which built a brand-new pane and fetched the directory —
  * and then immediately navigate it again, so one click cost two listings.
@@ -342,6 +491,50 @@ function navigateTo(mount, path) {
   if (view === 'files' && pane) { pane.navigate(mount, path); return; }
   showView('files');   // builds a pane already pointed at tab.mount/tab.path
 }
+
+/* ------------------------------------------------------- shareable URLs */
+
+/**
+ * Keep the address bar in step with the open folder, so reloading (or sending
+ * the URL to someone) lands back on the same place.
+ *
+ * Uses the query string rather than a path prefix: it works with any server
+ * configuration, including one that only routes `/` to the app.
+ */
+function syncUrl(loc, mode = 'push') {
+  if (!loc || !loc.mount) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set('mount', loc.mount);
+  url.searchParams.set('path', loc.path);
+  // A stale view parameter would put the reload somewhere unexpected.
+  url.searchParams.delete('view');
+  const next = url.pathname + url.search;
+  if (next === window.location.pathname + window.location.search) return;
+  try {
+    if (mode === 'replace') window.history.replaceState(state.historyState ?? null, '', next);
+    else window.history.pushState(state.historyState ?? null, '', next);
+    state.historyState = { mount: loc.mount, path: loc.path };
+  } catch (_) { /* history can be unavailable in odd embedding contexts */ }
+}
+
+/** Where should the app open? The URL wins over the saved session. */
+function locationFromUrl() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const mount = params.get('mount');
+    const path = params.get('path');
+    if (mount && typeof path === 'string' && path.startsWith('/')) {
+      return { mount, path };
+    }
+  } catch (_) { /* malformed URL — fall through to the default */ }
+  return null;
+}
+
+// Back/forward moves the folder, without pushing another entry.
+window.addEventListener('popstate', () => {
+  const loc = locationFromUrl();
+  if (loc && state.user && view === 'files') navigateTo(loc.mount, loc.path);
+});
 
 /* ----------------------------------------------------------------- topbar */
 
@@ -359,16 +552,19 @@ function buildTopbar() {
   tb.appendChild(mk('up', 'Up one level (Backspace)', () => { if (pane) pane.goUp(); }));
   tb.appendChild(mk('refresh', 'Refresh (F5)', () => { if (pane) pane.refresh(); }));
 
-  tb.appendChild(el('span', { class: 'only-wide', style: 'width:8px' }));
-  tb.appendChild(wide(mk('plus', 'New folder', () => newFolder())));
-  tb.appendChild(wide(mk('edit', 'New file', () => newFile())));
+  const writableDrive = canDo('create', currentMountInfo());
+  if (writableDrive) {
+    tb.appendChild(el('span', { class: 'only-wide', style: 'width:8px' }));
+    tb.appendChild(wide(mk('plus', 'New folder', () => newFolder())));
+    tb.appendChild(wide(mk('edit', 'New file', () => newFile())));
 
-  const up = el('button', { class: 'btn', title: 'Upload files (Ctrl+U)' }, icon('up'), el('span', { class: 'lbl', text: 'Upload' }));
-  up.addEventListener('click', () => pickUpload());
-  tb.appendChild(up);
+    const up = el('button', { class: 'btn', title: 'Upload files (Ctrl+U)' }, icon('up'), el('span', { class: 'lbl', text: 'Upload' }));
+    up.addEventListener('click', () => pickUpload());
+    tb.appendChild(up);
 
-  const upFolder = mk('folder-plus', 'Upload a whole folder (keeps its structure)', () => pickUploadFolder());
-  tb.appendChild(wide(upFolder));
+    const upFolder = mk('folder-plus', 'Upload a whole folder (keeps its structure)', () => pickUploadFolder());
+    tb.appendChild(wide(upFolder));
+  }
 
   tb.appendChild(el('span', { class: 'spacer' }));
 
@@ -428,6 +624,7 @@ function buildTopbar() {
       { label: state.user.displayName || state.user.username, disabled: true },
       { sep: true },
       { label: 'Change password', icon: 'edit', onClick: () => changePassword(false) },
+      { label: 'Two-factor authentication', icon: 'shield', onClick: () => twoFactorDialog() },
       {
         label: 'Reload app data', icon: 'refresh',
         onClick: () => {
@@ -517,6 +714,12 @@ function showView(name) {
   clear(c);
   if (name === 'trash') renderTrash(c);
   else if (name === 'recent') renderRecent(c);
+  else if (name === 'favourites') renderFavouritesView(c, {
+    onOpen: (f) => openFavourite(f),
+    onChanged: async () => { await refreshSidebarData(); },
+  });
+  else if (name === 'shares') renderSharesView(c, { onChanged: () => {} });
+  else if (name === 'settings') renderSettings(c, { onChangePassword: changePassword, onOpenView: (v) => showView(v) });
   else if (name === 'drives') renderDrivesView(c, { onChanged: onDrivesChanged });
   else if (name === 'admin-users') renderAdminUsers(c);
   else if (name === 'admin-mounts') renderAdminMounts(c);
@@ -586,6 +789,8 @@ function wirePane(p, secondary) {
     // though there is no listing entry to hand over.
     recordRecent(loc.mount, loc.path,
       { name: loc.path.split('/').filter(Boolean).pop() || loc.mount, type: 'dir' }, 'open');
+    // Keep the address bar useful: reload lands on the same folder.
+    syncUrl(loc, 'push');
   };
   p.onSelection = () => {
     if (secondary) return;
@@ -604,6 +809,9 @@ function wirePane(p, secondary) {
   p.onNewFile = (inst) => newFile(inst);
   p.onUpload = (inst) => pickUpload(inst);
   p.onToggleFavorite = (inst, entry) => toggleFavouriteFor(inst, entry);
+  p.onColumnsMenu = (e) => columnsMenu(e, p);
+  p.onFindDuplicates = (inst) => runDuplicateScan(inst);
+  p.onBulkRename = (inst, entries) => runBulkRename(inst, entries);
   p.onOpenEntry = (inst, entry) => {
     // Navigating into a folder is already recorded by onNavigate.
     if (entry.type !== 'dir') recordRecent(inst.loc.mount, entry.path, entry, 'preview');
@@ -723,13 +931,43 @@ function closeMenu() {
   window.removeEventListener('scroll', closeMenu, true);
 }
 
+/**
+ * Can the current user do `cap` on this drive? Reads the capability map the
+ * server publishes with every mount, so the UI never has to guess.
+ *
+ * Module scope on purpose: the context menu and the toolbar both need it, and a
+ * helper declared inside renderFiles() is invisible to the menu builder.
+ */
+function canDo(cap, mountInfo) {
+  const caps = mountInfo?.capabilities;
+  if (!caps) return true;          // unknown mount: let the server decide
+  return caps[cap] !== false;
+}
+
+/** The mount info for the drive the toolbar currently acts on. */
+function currentMountInfo() {
+  const tab = currentTab();
+  return (state.mounts || []).find(m => m.name === (tab ? tab.mount : '')) || null;
+}
+
+/**
+ * Drop menu items the account is not allowed to perform, so a read-only drive
+ * shows a menu that only offers what will actually work.
+ * `cap` on an item names the capability it needs; separators are always kept.
+ */
+function withCaps(items, mountInfo) {
+  const caps = mountInfo?.capabilities;
+  if (!caps) return items;
+  return items.filter((it) => it.sep || !it.cap || caps[it.cap] !== false);
+}
+
 function entryMenu(e, entry, inst) {
   const sel = inst.selectedEntries();
   const many = sel.length > 1;
   const target = many ? sel : [entry];
   const anyDir = target.some(t => t.type === 'dir');
   const onlyFiles = target.every(t => t.type !== 'dir');
-  const writable = inst.mountInfo ? inst.mountInfo.canWrite : true;
+  const writable = canDo('write', inst.mountInfo);
 
   const items = [];
   if (!many) {
@@ -744,11 +982,12 @@ function entryMenu(e, entry, inst) {
   items.push(
     { label: many ? `Download ${target.length} items` : 'Download', icon: 'download', disabled: anyDir, onClick: () => target.forEach(t => triggerDownload(inst.loc.mount, t.path)) },
     { label: 'Copy', icon: 'copy', onClick: () => stageClipboard(inst, target, 'copy') },
-    { label: 'Cut', icon: 'cut', disabled: !writable, onClick: () => stageClipboard(inst, target, 'cut') },
+    { label: 'Cut', icon: 'cut', cap: 'write', disabled: !writable, onClick: () => stageClipboard(inst, target, 'cut') },
     { sep: true },
-    { label: 'Rename', icon: 'edit', disabled: many || !writable, onClick: () => renameEntry(inst, entry) },
-    { label: 'Compress to ZIP', icon: 'archive', onClick: () => compress(inst, target) },
-    { label: 'Extract here', icon: 'archive', disabled: many || entry.type === 'dir', onClick: () => extract(inst, entry) },
+    { label: 'Rename', icon: 'edit', cap: 'rename', disabled: many || !writable, onClick: () => renameEntry(inst, entry) },
+    { label: `Rename ${target.length} items…`, icon: 'edit', cap: 'rename', disabled: !many || !writable, onClick: () => runBulkRename(inst, target) },
+    { label: 'Compress to ZIP', icon: 'archive', cap: 'create', onClick: () => compress(inst, target) },
+    { label: 'Extract here', icon: 'archive', cap: 'create', disabled: many || entry.type === 'dir', onClick: () => extract(inst, entry) },
     {
       // Reflect the actual state — this used to always read "Add to favorites",
       // so clicking it on a favourited item silently removed it.
@@ -758,24 +997,26 @@ function entryMenu(e, entry, inst) {
       onClick: () => toggleFavouriteFor(inst, entry),
     },
     { sep: true },
-    { label: 'Delete', icon: 'trash', danger: true, disabled: !writable, onClick: () => deleteEntries(inst, target) },
+    { label: 'Share…', icon: 'share', disabled: many, onClick: () => shareDialog({ mount: inst.loc.mount, path: entry.path, name: entry.name, type: entry.type }) },
+    { label: 'Delete', icon: 'trash', cap: 'delete', danger: true, disabled: !writable, onClick: () => deleteEntries(inst, target) },
   );
-  openMenu(e.clientX, e.clientY, items);
+  openMenu(e.clientX, e.clientY, withCaps(items, inst.mountInfo));
 }
 
 function backgroundMenu(e, inst) {
   const items = [
-    { label: 'New folder', icon: 'plus', onClick: () => newFolder(inst) },
-    { label: 'New file', icon: 'edit', onClick: () => newFile(inst) },
-    { label: 'Upload files…', icon: 'up', onClick: () => pickUpload(inst) },
-    { label: 'Upload folder…', icon: 'folder-plus', onClick: () => pickUploadFolder(inst) },
+    { label: 'New folder', icon: 'plus', cap: 'create', onClick: () => newFolder(inst) },
+    { label: 'New file', icon: 'edit', cap: 'create', onClick: () => newFile(inst) },
+    { label: 'Upload files…', icon: 'up', cap: 'create', onClick: () => pickUpload(inst) },
+    { label: 'Upload folder…', icon: 'folder-plus', cap: 'create', onClick: () => pickUploadFolder(inst) },
     { sep: true },
-    { label: 'Paste', icon: 'paste', disabled: !state.clipboard, onClick: () => pasteInto(inst) },
+    { label: 'Paste', icon: 'paste', cap: 'create', disabled: !state.clipboard, onClick: () => pasteInto(inst) },
     { sep: true },
+    { label: 'Find duplicates…', icon: 'copy', onClick: () => runDuplicateScan(inst) },
     { label: 'Refresh', icon: 'refresh', onClick: () => inst.refresh() },
     { label: 'Select all', icon: 'check', onClick: () => inst.selectAll() },
   ];
-  openMenu(e.clientX, e.clientY, items);
+  openMenu(e.clientX, e.clientY, withCaps(items, inst.mountInfo));
 }
 
 /* ------------------------------------------------------------- file actions */
@@ -811,12 +1052,101 @@ async function newFile(inst = pane) {
   });
 }
 
+/* ---------------------------------------------------------------- undo */
+
+/**
+ * The last reversible operation. Single level on purpose: it matches what the
+ * user just did and is honest about what can be undone.
+ */
+let lastOp = null;
+
+/** Record an operation as undoable and surface the affordance. */
+function rememberUndo(op, summary) {
+  lastOp = op;
+  if (summary) toast(summary, 'ok', 6000, { label: 'Undo', onClick: undoLast });
+}
+
+/** Can this operation be undone at all? */
+function isUndoable(op) {
+  if (!op) return false;
+  if (op.kind === 'move') return (op.moves || []).length > 0;
+  if (op.kind === 'delete') return op.trash === true && (op.items || []).length > 0;
+  return false;
+}
+
+/**
+ * Undo the last operation.
+ *
+ * Moves and renames are reversed by moving back; deletions are restored from
+ * trash (a permanent delete is never offered as undoable — the confirm dialog
+ * already says so).
+ */
+async function undoLast() {
+  const op = lastOp;
+  lastOp = null;
+  if (!isUndoable(op)) { toastWarn('Nothing to undo'); return; }
+
+  try {
+    if (op.kind === 'move') {
+      // Reverse each pair: move the new path back to its old parent.
+      const byMount = new Map();
+      for (const m of op.moves) {
+        if (!byMount.has(m.mount)) byMount.set(m.mount, []);
+        byMount.get(m.mount).push({ path: m.to });
+      }
+      let restored = 0;
+      for (const [mount, items] of byMount) {
+        const dests = new Set(op.moves.filter(m => m.mount === mount).map(m => dirOf(m.from)));
+        for (const dest of dests) {
+          await fsMoveBatch(mount, items, dest, mount);
+          invalidateList(mount, dest);
+        }
+        restored += items.length;
+        for (const m of op.moves) invalidateList(mount, dirOf(m.to));
+      }
+      toastOk(`Restored ${restored} item(s)`);
+      repaintPanes();
+      return;
+    }
+
+    if (op.kind === 'delete') {
+      // Restore from trash by matching the original path.
+      const listing = await trashList(op.mount);
+      const byPath = new Map((listing || []).map(t => [t.original_path, t.id]));
+      let restored = 0;
+      let missing = 0;
+      const parents = new Set();
+      for (const it of op.items) {
+        const id = byPath.get(it.path);
+        if (id === undefined) { missing++; continue; }
+        await trashRestore(op.mount, id);
+        restored++;
+        // The pane showing that folder must re-read it, or the restored item
+        // will not appear until the user navigates away and back.
+        parents.add(dirOf(it.path));
+        invalidateList(op.mount, dirOf(it.path));
+      }
+      if (restored) {
+        toastOk(`Restored ${restored} item(s)`);
+        // Any pane sitting in a folder that got something back must re-read it.
+        for (const p of state.panes) {
+          if (parents.has(p.loc.path)) p.revalidate();
+        }
+      }
+      if (missing) toastWarn(`${missing} item(s) could not be restored — they may already be gone from the trash`);
+      return;
+    }
+  } catch (e) {
+    toastErr(e.message);
+  }
+}
+
 async function renameEntry(inst, entry) {
   const name = await promptDialog('New name', entry.name, { title: 'Rename', okLabel: 'Rename' });
   if (!name || name === entry.name) return;
   const mount = inst.loc.mount;
   const target = joinPath(dirOf(entry.path), name);
-  await runOp({
+  const res = await runOp({
     pane: inst,
     patch: () => {
       // Keep the selection on the row as it moves to its new name.
@@ -830,6 +1160,13 @@ async function renameEntry(inst, entry) {
     invalidate: [[mount, dirOf(entry.path)], [mount, inst.loc.path]],
     okMsg: 'Renamed',
   });
+  // A rename IS a move, so it is undoable the same way.
+  if (res && !res.skipped) {
+    rememberUndo({
+      kind: 'move',
+      moves: [{ mount, from: entry.path, to: target }],
+    }, 'Renamed');
+  }
 }
 
 function renameSelection(inst) {
@@ -839,6 +1176,61 @@ function renameSelection(inst) {
 }
 
 function deleteSelection(inst) { deleteEntries(inst, inst.selectedEntries()); }
+
+/** Right-click the list header to choose which columns are visible. */
+function columnsMenu(e, inst) {
+  const cols = [
+    ['size', 'Size'],
+    ['mtime', 'Modified'],
+    ['owner', 'Owner'],
+  ];
+  openMenu(e.clientX, e.clientY, [
+    ...cols.map(([key, label]) => ({
+      label: `${state.cols[key] ? 'Hide' : 'Show'} ${label}`,
+      icon: state.cols[key] ? 'check' : 'info',
+      onClick: () => {
+        setColumn(key, !state.cols[key]);
+        if (inst) inst.syncColumns();
+        // Force a repaint so every visible row picks up the new visibility.
+        if (inst) { inst.viewDirty = true; inst.render(); }
+      },
+    })),
+  ]);
+}
+
+/** Scan the open folder for duplicates and offer to select or delete them. */
+function runDuplicateScan(inst) {
+  if (!inst) return;
+  duplicatesDialog({
+    entries: inst.entries,
+    folderLabel: inst.loc.path,
+    onSelect: (paths) => {
+      inst.selected.clear();
+      for (const p of paths) inst.selected.add(p);
+      inst.paintSelection();
+      toastOk(`${paths.length} duplicate(s) selected`);
+    },
+    // deleteEntries() owns the confirm dialog AND the password gate, so the
+    // gate is not applied twice here.
+    onDelete: (entries) => deleteEntries(inst, entries),
+  });
+}
+
+/** Bulk-rename the current selection. */
+function runBulkRename(inst, entries) {
+  if (!inst) return;
+  const sel = entries && entries.length ? entries : inst.selectedEntries();
+  if (sel.length < 2) { toastWarn('Select at least two items to rename'); return; }
+  const siblings = inst.entries
+    .filter((e) => !sel.some((s) => s.path === e.path))
+    .map((e) => e.name);
+  bulkRenameDialog({
+    mount: inst.loc.mount,
+    entries: sel,
+    siblingNames: siblings,
+    onDone: () => inst.refresh(),
+  });
+}
 
 async function deleteEntries(inst, entries) {
   if (!entries || !entries.length) return;
@@ -854,6 +1246,15 @@ async function deleteEntries(inst, entries) {
   // Files vanish instantly. Folders are handled by a background job, so they
   // stay visible (dimmed) until the worker confirms.
   const files = entries.filter(e => e.type !== 'dir');
+
+  // Ask for the password BEFORE the optimistic patch. runOp() hides the rows
+  // first and rolls them back on failure, so letting the 403 happen inside it
+  // would flash "deleted" and then resurrect everything behind a dialog.
+  if (isGated('fs.delete', permanent)) {
+    const granted = await ensureSensitive('fs.delete');
+    if (!granted) return;
+  }
+
   const res = await runOp({
     pane: inst,
     patch: () => ({ remove: files.map(e => e.path) }),
@@ -861,8 +1262,20 @@ async function deleteEntries(inst, entries) {
     call: () => fsDeleteBatch(mount, entries.map(e => ({ path: e.path })), permanent),
     invalidate: [[mount, inst.loc.path]],
   });
-  if (res) reportBatch(res, { verb: 'Deleted', openJobs });
-  if (res) inst.scheduleRevalidate(700);
+  if (!res) return;
+
+  reportBatch(res, { verb: 'Deleted', openJobs });
+  inst.scheduleRevalidate(700);
+  // Only trash-based deletes are undoable; the confirm dialog tells the user
+  // when a delete is permanent.
+  if (!permanent) {
+    rememberUndo({
+      kind: 'delete',
+      trash: true,
+      mount,
+      items: entries.map(e => ({ path: e.path, name: e.name })),
+    }, `Deleted ${entries.length} item(s)`);
+  }
 }
 
 /* ------------------------------------------- selection-bar / drag-drop actions */
@@ -913,7 +1326,18 @@ async function movePaths(inst, paths, destMount, destDir, srcMount) {
   });
   if (res) reportBatch(res, { verb: 'Moved', openJobs });
   if (res && skipped) toastWarn(`${skipped} item(s) skipped`);
-  if (res) inst.scheduleRevalidate(700);
+  if (res) {
+    inst.scheduleRevalidate(700);
+    // `done` carries {path, dest}, which is exactly the from→to pair undo needs.
+    // Items handed to a background job (folders, cross-mount) are not undoable
+    // here, because their destination is not known yet.
+    const moves = (res.done || [])
+      .filter(d => d.dest)
+      .map(d => ({ mount, from: d.path, to: d.dest }));
+    if (moves.length) {
+      rememberUndo({ kind: 'move', moves }, `Moved ${moves.length} item(s)`);
+    }
+  }
 }
 
 async function compress(inst, entries) {
@@ -1163,8 +1587,15 @@ async function renderTrash(c) {
     const ok = await confirmDialog('Permanently delete everything in the trash? This cannot be undone.',
       { title: 'Empty trash', danger: true, okLabel: 'Empty trash' });
     if (!ok) return;
-    for (const m of state.mounts) { try { await trashEmpty(m.name); } catch (_) {} }
-    toastOk('Trash emptied');
+    // Password gate — emptying trash is the most destructive thing in the app.
+    // One grant covers every mount, so this is asked once, not per drive.
+    const granted = await ensureSensitive('trash.empty');
+    if (!granted) return;
+    let emptied = 0;
+    for (const m of state.mounts) {
+      try { await trashEmpty(m.name); emptied++; } catch (_) { /* mount may not have trash */ }
+    }
+    if (emptied) toastOk('Trash emptied');
     showView('trash');
   });
   toolbar.appendChild(emptyBtn);
@@ -1211,6 +1642,8 @@ async function renderTrash(c) {
     purge.addEventListener('click', async () => {
       const ok = await confirmDialog(`Permanently delete "${it.name}"?`, { title: 'Delete', danger: true, okLabel: 'Delete' });
       if (!ok) return;
+      const granted = await ensureSensitive('trash.empty');
+      if (!granted) return;
       try { await trashPurge(it.mountName, it.id); toastOk('Deleted'); showView('trash'); }
       catch (e) { toastErr(e.message); }
     });
@@ -1511,8 +1944,10 @@ async function renderAdminConnections(c) {
     });
     const del = el('button', { class: 'btn danger' }, 'Delete');
     del.addEventListener('click', async () => {
-      const ok = await confirmDialog(`Delete connection "${cn.name}"?`, { title: 'Delete connection', danger: true, okLabel: 'Delete' });
+      const ok = await confirmDialog(`Delete connection "${cn.name}"? Any drive using it will stop working.`, { title: 'Delete connection', danger: true, okLabel: 'Delete' });
       if (!ok) return;
+      const granted = await ensureSensitive('connection.delete');
+      if (!granted) return;
       try { await api.delete(`/api/admin/connections/${cn.id}`); toastOk('Connection deleted'); showView('admin-connections'); }
       catch (e) { toastErr(e.message); }
     });
@@ -1659,7 +2094,7 @@ async function toggleFavouriteFor(inst, entry) {
   const mount = inst ? inst.loc.mount : '';
   if (!mount || !entry) return;
   try {
-    await toggleFavorite(mount, entry.path, entry.name);
+    await toggleFavorite(mount, entry.path, entry.name, entry.type);
   } catch (e) {
     toastErr(e.message);
     return;
@@ -1763,6 +2198,10 @@ async function logout() {
   state.recent = [];
   setCsrf('');
 
+  // Drop any short-lived sensitive-action grants so the next session starts
+  // clean; the server expires them anyway, but don't even hint they persist.
+  resetGrants();
+
   renderLogin();
 }
 
@@ -1803,6 +2242,7 @@ function globalKeys(e) {
   if (view !== 'files' || !pane) return;
   const mod = e.ctrlKey || e.metaKey;
   if (e.key === 'F5') { e.preventDefault(); pane.refresh(); return; }
+  if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); undoLast(); return; }
   if (mod && e.key.toLowerCase() === 'b') {
     e.preventDefault();
     if (shellNodes.sidebar && shellNodes.sidebar.toggleCollapse) shellNodes.sidebar.toggleCollapse();

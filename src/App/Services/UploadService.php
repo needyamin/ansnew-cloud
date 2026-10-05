@@ -64,6 +64,9 @@ final class UploadService
                 throw new RuntimeException('Cannot read uploaded file');
             }
             try {
+                // Content check, not just the extension: a .jpg that is really
+                // PHP must not land on the server.
+                FileService::assertNotExecutableContent($fh);
                 $plan['adapter']->putStream($plan['target'], $fh);
             } finally {
                 fclose($fh);

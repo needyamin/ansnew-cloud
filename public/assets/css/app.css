@@ -280,6 +280,57 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 /* ---------- sort control ---------- */
 .fm-toolbar .sort-select { flex-shrink: 0; font-size: 12.5px; padding: 5px 8px; }
 
+/* ---------- file-type filter bar ---------- */
+/* Its own row under the toolbar: eight chips cannot share a line with the
+   breadcrumbs without pushing the sort and search controls off-screen. */
+.filterbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--bg2);
+}
+.filter-chips { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text2); font-size: 12.5px; cursor: pointer; white-space: nowrap;
+}
+.chip:hover { background: var(--hover); border-color: var(--border2); color: var(--text); }
+.chip[hidden] { display: none; }
+/* Active state is driven by aria-selected as well as .active so the styling
+   cannot drift from what a screen reader announces. */
+.chip.active, .chip[aria-selected="true"] {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+.chip-count { font-size: 11px; opacity: .75; font-variant-numeric: tabular-nums; }
+.chip.active .chip-count { opacity: .9; }
+/* The extension dropdown is secondary, so it shrinks first. */
+.ext-select { flex-shrink: 0; font-size: 12.5px; padding: 5px 8px; max-width: 170px; }
+.filterbar .btn.sm { flex-shrink: 0; padding: 4px 10px; font-size: 12.5px; }
+/* A visible cue that the listing is not complete. */
+.filterbar.filtering { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* ---------- duplicates dialog ---------- */
+.dup-list { display: flex; flex-direction: column; gap: 12px; max-height: 56vh; overflow: auto; padding: 4px 2px; }
+.dup-group { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg2); }
+.dup-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--bg3); border-bottom: 1px solid var(--border); font-size: 13px; }
+.dup-head .dup-count { font-weight: 600; }
+.dup-item { display: flex; align-items: center; gap: 8px; padding: 6px 12px; cursor: pointer; }
+.dup-item:hover { background: var(--hover); }
+.dup-item input { flex-shrink: 0; }
+.dup-name { font-size: 13px; word-break: break-all; }
+.dup-keep { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--accent); color: #fff; }
+.dup-meta { font-size: 11.5px; margin-left: auto; }
+
+/* ---------- bulk rename preview ---------- */
+.rename-preview { display: flex; flex-direction: column; max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--bg2); }
+.rename-row { display: flex; align-items: center; gap: 8px; padding: 5px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
+.rename-row:last-child { border-bottom: none; }
+.rename-row.bad { background: color-mix(in srgb, var(--err) 12%, transparent); }
+.rn-from { color: var(--text2); text-decoration: line-through; word-break: break-all; }
+.rn-arrow { color: var(--text3); flex-shrink: 0; }
+.rn-to { word-break: break-all; }
+.rn-err { margin-left: auto; color: var(--err); font-size: 12px; flex-shrink: 0; }
+
 /* ---------- loading skeleton ---------- */
 /* The skeleton is transient, so it is NOT virtualized: it flows normally
    inside the scroll container while the spacer stays collapsed. */
@@ -301,6 +352,9 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 
 /* ---------- empty state ---------- */
 .empty-state { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 48px 20px; text-align: center; }
+/* `display:flex` above would beat the UA [hidden] rule, so the empty message
+   stayed on screen over a folder that had content. Explicit wins. */
+.empty-state[hidden] { display: none; }
 .empty-state .empty-ico { width: 46px; height: 46px; color: var(--text3); opacity: .6; margin-bottom: 4px; }
 .empty-state .empty-title { font-weight: 600; }
 .empty-state .empty-sub { font-size: 13px; }
@@ -444,6 +498,17 @@ svg.icon {
   .btn.icon { min-width: 40px; min-height: 40px; justify-content: center; }
   .fm-toolbar .search { width: 100% !important; }  /* search gets its own row */
   .crumbs { min-width: 0; }
+  /* Chips scroll sideways instead of wrapping to three lines: a phone has no
+     vertical room to spare, and a horizontal swipe is the expected gesture. */
+  .filterbar { flex-wrap: wrap; }
+  .filter-chips {
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+    -webkit-overflow-scrolling: touch; padding-bottom: 2px;
+  }
+  .filter-chips::-webkit-scrollbar { display: none; }
+  .chip { min-height: 44px; padding: 4px 14px; }   /* touch target */
+  .ext-select { min-height: 44px; max-width: 140px; }
+  .filterbar .btn.sm { min-height: 44px; }
   .details { display: none; }                   /* shown as a sheet instead */
   .jobdrawer { width: 100vw; }
   body.jobdrawer-open .uploadtray { right: 14px; }
@@ -463,4 +528,78 @@ svg.icon {
   .tab { max-width: 150px; }
   .preview-bar { padding: 8px 12px; }
   .preview-body { padding: 0 8px 8px; }
+  /* Sort and "specific type" share one row; the Clear button follows. */
+  .filterbar { flex-wrap: wrap; row-gap: 6px; }
+  .ext-select { max-width: none; flex: 1; }
+  .filterbar .btn.sm { flex: 1; justify-content: center; }
+}
+
+/* ---------- two-factor authentication ---------- */
+.totp-secret {
+  display: inline-block; font-family: var(--mono, monospace); font-size: 15px;
+  letter-spacing: 1px; background: var(--bg3); padding: 8px 10px; border-radius: 6px;
+  user-select: all; word-break: break-all;
+}
+.totp-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.totp-uri { font-size: 11.5px; word-break: break-all; display: block; margin: 4px 0 10px; }
+.recovery-codes {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px;
+  font-family: var(--mono, monospace); font-size: 13px;
+}
+.recovery-codes code { background: var(--bg3); padding: 6px 8px; border-radius: 5px; text-align: center; user-select: all; }
+@media (max-width: 480px) { .recovery-codes { grid-template-columns: 1fr; } }
+.login-title { margin: 0 0 4px; }
+.login-hint { margin: 0 0 10px; font-size: 13px; }
+
+/* ---------- advanced settings ---------- */
+.settings-grid, .admin-page > .settings-card { margin: 0 0 14px; }
+.settings-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 16px; margin-bottom: 14px;
+}
+.settings-card h3 {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 12px;
+  font-size: 14.5px; font-weight: 600;
+}
+.settings-card h3 .ico { width: 16px; height: 16px; color: var(--accent); }
+.settings-card-body .kv {
+  display: flex; gap: 14px; padding: 5px 0; font-size: 13.5px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-card-body .kv:last-of-type { border-bottom: none; }
+.settings-card-body .k { color: var(--text3); min-width: 190px; flex-shrink: 0; }
+.settings-card-body .v { color: var(--text); word-break: break-word; }
+.settings-card-body .muted { font-size: 13.5px; line-height: 1.55; margin: 0 0 10px; }
+.settings-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+@media (max-width: 560px) { .settings-card-body .k { min-width: 0; } }
+
+/* ---------- share dialog ---------- */
+.share-url {
+  width: 100%; font-family: var(--mono, monospace); font-size: 12.5px;
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 9px 10px; margin: 6px 0 10px;
+}
+.warning-text { color: var(--warn, #f0b429); }
+.field { display: block; margin: 0 0 10px; font-size: 13px; }
+.field input, .field select {
+  display: block; width: 100%; margin-top: 5px; background: var(--bg3);
+  border: 1px solid var(--border); color: var(--text); border-radius: 8px;
+  padding: 9px 10px; font-size: 14px;
+}
+.checkbox { display: flex; align-items: center; gap: 8px; font-size: 13.5px; margin: 8px 0; }
+
+/* toast with an action button (e.g. "Deleted 3 items  [Undo]") */
+.toast { display: flex; align-items: center; gap: 12px; }
+.toast .msg { flex: 1; }
+.toast-action {
+  background: rgba(255,255,255,.12); color: inherit; border: 1px solid rgba(255,255,255,.25);
+  border-radius: 6px; padding: 4px 10px; font-size: 12.5px; cursor: pointer; flex-shrink: 0;
+}
+.toast-action:hover { background: rgba(255,255,255,.2); }
+
+/* read-only badge in the crumbs bar */
+.ro-badge {
+  margin-left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 11.5px;
+  background: rgba(240,180,41,.14); color: var(--warn, #f0b429);
+  border: 1px solid rgba(240,180,41,.35); white-space: nowrap;
 }

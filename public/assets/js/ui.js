@@ -8,10 +8,24 @@ const box = () => {
   return b;
 };
 
-export function toast(message, kind = 'info', ms = 4200) {
-  const t = el('div', { class: 'toast ' + kind }, message);
+/**
+ * Show a toast. `action` (optional) turns it into an actionable notice — used
+ * for "Deleted 3 items  [Undo]".
+ * @param {{label:string, onClick:Function}} [action]
+ */
+export function toast(message, kind = 'info', ms = 4200, action = null) {
+  const t = el('div', { class: 'toast ' + kind });
+  t.appendChild(el('span', { class: 'msg', text: message }));
+  if (action && typeof action.onClick === 'function') {
+    const b = el('button', { class: 'toast-action', text: action.label || 'Undo' });
+    b.addEventListener('click', () => {
+      try { action.onClick(); } finally { t.remove(); }
+    });
+    t.appendChild(b);
+  }
   box().appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .4s'; setTimeout(() => t.remove(), 400); }, ms);
+  const life = ms + (action ? 4000 : 0);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .4s'; setTimeout(() => t.remove(), 400); }, life);
   return t;
 }
 export const toastOk = (m) => toast(m, 'ok');
@@ -86,6 +100,82 @@ export function promptDialog(message, value = '', { title = 'Input', okLabel = '
     });
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { if (submit()) close(); } });
     setTimeout(() => { input.focus(); input.select(); }, 30);
+  });
+}
+
+/**
+ * Re-enter the account password to authorise a destructive action.
+ *
+ * Deliberately NOT built on promptDialog(): the value is a secret, so it needs
+ * type=password, must never be echoed back into the dialog on a retry, and the
+ * error has to come from the server rather than a local validator.
+ *
+ * `submit` is provided by the caller (see sensitive.js) so this stays a pure
+ * view: it never knows that /api/auth/confirm exists.
+ *
+ * @param {object}   opts
+ * @param {string}   opts.message      Why the password is needed.
+ * @param {Function} opts.submit       async (password, code) -> {ok:true} | {error:string}
+ * @param {boolean}  [opts.needsCode]  Show an authenticator code field (2FA accounts).
+ * @returns {Promise<boolean>} true once the server accepted the credentials.
+ */
+export function passwordDialog({ title = 'Confirm your password', message, submit, needsCode = false, okLabel = 'Confirm' } = {}) {
+  return new Promise((resolve) => {
+    const pw = el('input', {
+      type: 'password', autocomplete: 'current-password',
+      placeholder: 'Account password', style: 'width:100%',
+      'aria-label': 'Account password',
+    });
+    const code = needsCode
+      ? el('input', {
+          type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code',
+          placeholder: '6-digit code', maxlength: '8', style: 'width:100%',
+          'aria-label': 'Authenticator code',
+        })
+      : null;
+    const errEl = el('div', { class: 'err', style: 'color:var(--err);font-size:12.5px;min-height:16px' });
+
+    const trySubmit = async () => {
+      const value = pw.value;
+      if (!value) { errEl.textContent = 'Enter your password'; return false; }
+      errEl.textContent = 'Checking…';
+      try {
+        const r = await submit(value, code ? code.value.trim() : '');
+        if (r && r.ok) { resolve(true); return true; }
+        errEl.textContent = (r && r.error) || 'Password is incorrect';
+        // Clear the field: a wrong password must not sit there in plain text
+        // waiting to be re-submitted by a stray Enter.
+        pw.value = '';
+        pw.focus();
+        return false;
+      } catch (e) {
+        errEl.textContent = e && e.message ? e.message : 'Confirmation failed';
+        return false;
+      }
+    };
+
+    const body = [el('p', { text: message || 'Enter your password to continue.' })];
+    if (code) {
+      body.push(el('label', { class: 'field' }, 'Account password', pw));
+      body.push(el('label', { class: 'field' }, 'Authenticator code', code));
+    } else {
+      body.push(el('label', { class: 'field' }, 'Account password', pw));
+    }
+    body.push(errEl);
+
+    const { close } = dialog({
+      title,
+      body,
+      buttons: [
+        { label: 'Cancel', onClick: () => resolve(false) },
+        { label: okLabel, kind: 'primary', primary: true, onClick: () => trySubmit() },
+      ],
+    });
+
+    const onEnter = (e) => { if (e.key === 'Enter') { if (trySubmit()) close(); } };
+    pw.addEventListener('keydown', onEnter);
+    if (code) code.addEventListener('keydown', onEnter);
+    setTimeout(() => pw.focus(), 30);
   });
 }
 

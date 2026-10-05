@@ -165,8 +165,16 @@ final class FsController
         $path = (string) ($body['path'] ?? '');
         $permanent = Validator::bool($body['permanent'] ?? false);
 
+        $gated = \App\Auth\SensitiveGate::guard($session, 'fs.delete', $permanent);
+        if ($gated !== null) {
+            return $gated;
+        }
+
         // Folders can be big -> background job; files inline.
         [$m, $adapter, $norm] = StorageManager::resolve($user, $mount, $path);
+        // Gated HERE, not only in the worker: a read-only account must not be
+        // able to enqueue a delete job, and this used to have no check at all.
+        \App\Auth\Policy::assertCan(null, $m->canWrite, $user->isAdmin(), 'delete');
         $stat = $adapter->stat($norm);
 
         if (($stat['type'] ?? '') === 'dir') {
@@ -253,6 +261,25 @@ final class FsController
         }
         $permanent = Validator::bool($body['permanent'] ?? false);
 
+        // Whole-selection deletes are the easiest thing to trigger by accident
+        // (Ctrl+A, Delete), so the password is asked once for the batch rather
+        // than per item.
+        $gated = \App\Auth\SensitiveGate::guard($session, 'fs.delete', $permanent);
+        if ($gated !== null) {
+            return $gated;
+        }
+
+        // Resolve the destination mount once and gate the whole batch on it.
+        // Deletion had no permission check at all before, so a read-only grant
+        // did not prevent deleting. mountFor() is the per-user view: it folds
+        // the grant, so a canWrite=false grant is honoured here.
+        try {
+            $m = StorageManager::mountFor($user, $mount);
+        } catch (\Throwable $e) {
+            return Response::error('Mount not found or access denied', 404, 'not_found');
+        }
+        \App\Auth\Policy::assertCan(null, $m->canWrite, $user->isAdmin(), 'delete');
+
         $done = [];
         $async = [];
         $failed = [];
@@ -287,6 +314,46 @@ final class FsController
         )), 'delete-batch');
 
         return Response::ok(['done' => $done, 'async' => $async, 'failed' => $failed]);
+    }
+
+    /**
+     * POST /api/fs/{mount}/rename-batch
+     * {"items":[{"path":"/a/x.txt","name":"y.txt"}]}
+     * -> {"done":[{"path":...,"newPath":...,"name":...}], "failed":[...], "skipped":[...]}
+     *
+     * Names are computed by the client (find/replace, prefix, numbering…) but
+     * every one is re-validated server-side, so a hostile client cannot smuggle
+     * a path traversal or a forbidden extension through a rename.
+     */
+    public static function renameBatch(Request $req, SessionManager $session, string $mount): Response
+    {
+        $user = Guard::requireUser($session);
+        $body = $req->json();
+        $items = self::batchItems($body['items'] ?? null);
+        if (!$items) {
+            return Response::error('No items given', 400, 'bad_request');
+        }
+        if (count($items) > self::BATCH_LIMIT) {
+            return Response::error('Too many items (max ' . self::BATCH_LIMIT . ')', 400, 'too_many');
+        }
+
+        try {
+            $m = StorageManager::mountFor($user, $mount);
+        } catch (\Throwable $e) {
+            return Response::error('Mount not found or access denied', 404, 'not_found');
+        }
+        \App\Auth\Policy::assertCan(null, $m->canWrite, $user->isAdmin(), 'rename');
+
+        $r = FileService::renameBatch($user, $mount, $items);
+
+        $touched = array_merge(array_column($r['done'], 'path'), array_column($r['done'], 'newPath'));
+        if ($touched) {
+            NotifyService::fsChanged($user->id, self::dirMap(array_map(
+                static fn (string $p): array => [$mount, PathGuard::dirname($p)],
+                $touched
+            )), 'rename-batch');
+        }
+        return Response::ok($r);
     }
 
     /**
@@ -326,6 +393,15 @@ final class FsController
         } catch (\Throwable $e) {
             return Response::error('Invalid destination: ' . $e->getMessage(), 400, 'bad_request');
         }
+        // The destination must accept writes. The inline path checks this inside
+        // moveInline/copyInline, but the job-backed path runs without a user, so
+        // without this a read-only grant could be bypassed by moving a folder.
+        try {
+            $destMountRow = StorageManager::mountFor($user, $destMount);
+        } catch (\Throwable $e) {
+            return Response::error('Destination mount not found or access denied', 404, 'not_found');
+        }
+        \App\Auth\Policy::assertCan(null, $destMountRow->canWrite, $user->isAdmin(), 'moveInto');
 
         $done = [];
         $async = [];

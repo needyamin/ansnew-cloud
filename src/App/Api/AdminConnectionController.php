@@ -118,6 +118,13 @@ final class AdminConnectionController
 
     public static function delete(Request $req, SessionManager $session, int $id): Response
     {
+        // Same rationale as ConnectionController::delete — this removes stored
+        // remote credentials and can break every drive built on them.
+        $gated = \App\Auth\SensitiveGate::guard($session, 'connection.delete');
+        if ($gated !== null) {
+            return $gated;
+        }
+
         $admin = Guard::requireAdmin($session);
         $db = Database::i();
         $row = $db->one('SELECT name FROM connections WHERE id = :id', [':id' => $id]);

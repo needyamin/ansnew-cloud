@@ -193,3 +193,14 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     version    TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Tracks files dropped into the NAS SMB inbox so the watcher imports each once.
+CREATE TABLE IF NOT EXISTS nas_inbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    path        TEXT NOT NULL,
+    size        INTEGER NOT NULL DEFAULT 0,
+    status      TEXT NOT NULL DEFAULT 'done',
+    imported_at INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(path)
+);
+CREATE INDEX IF NOT EXISTS idx_nas_inbox_status ON nas_inbox(status);

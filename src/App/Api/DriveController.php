@@ -61,6 +61,14 @@ final class DriveController
      */
     public static function disconnect(Request $req, SessionManager $session, int $id): Response
     {
+        // Losing a drive's registration is the most disorienting thing a stray
+        // click can do here — every share link and pinned path built on the
+        // slug stops resolving — so it needs the password.
+        $gated = \App\Auth\SensitiveGate::guard($session, 'drive.disconnect');
+        if ($gated !== null) {
+            return $gated;
+        }
+
         $user = Guard::requireUser($session);
         $r = DriveService::disconnect($user, $id);
         self::announce($user->id, 'drive-disconnect');

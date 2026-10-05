@@ -126,7 +126,7 @@ export async function consumeDownloadToken(token) {
  *
  * @returns {Promise<boolean>} the NEW state — true if now favourited
  */
-export async function toggleFavorite(mount, path, label) {
+export async function toggleFavorite(mount, path, label, type = 'file') {
   const on = isFavorite(mount, path);
   if (on) {
     // Params go in the query string, not a DELETE body — see the note on
@@ -134,12 +134,35 @@ export async function toggleFavorite(mount, path, label) {
     await api.delete(`/api/favorites?mount=${encodeURIComponent(mount)}&path=${encodeURIComponent(path)}`);
     setFavorites(state.favorites.filter((f) => !(f.mount === mount && f.path === path)));
   } else {
-    await api.post('/api/favorites', { mount, path, label });
-    setFavorites([{ mount, path, label }, ...state.favorites]);
+    await api.post('/api/favorites', { mount, path, label, type });
+    setFavorites([{ mount, path, label, type }, ...state.favorites]);
   }
   invalidate('favorites');
   toastOk(on ? 'Removed from favourites' : 'Added to favourites');
   return !on;
+}
+
+/**
+ * Remove every favourite at once.
+ *
+ * The server gate (`favorites.clear`) is what actually protects this, so the
+ * caller wraps it in withSensitive() — see favourites.js / main.js.
+ */
+export async function clearAllFavorites() {
+  const r = await api.delete('/api/favorites/all');
+  setFavorites([]);
+  invalidate('favorites');
+  return r;
+}
+
+/**
+ * Rename a whole selection in one request.
+ * @param {Array<{path:string,name:string}>} items
+ */
+export async function fsRenameBatch(mount, items) {
+  const r = await api.post(`/api/fs/${encodeURIComponent(mount)}/rename-batch`, { items });
+  for (const it of items) invalidatePath(mount, it.path);
+  return r;
 }
 
 export async function trashList(mount) {

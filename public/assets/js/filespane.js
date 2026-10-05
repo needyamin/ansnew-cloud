@@ -32,6 +32,7 @@ import { runUploadsWithUI } from './uploadtray.js';
 import { toastErr, toastOk } from './ui.js';
 import { onLongPress } from './gestures.js';
 import { isThumbnailable, thumbUrl, createThumbObserver, onThumbError } from './thumbnails.js';
+import { FilterBar, matches } from './filters.js';
 
 const DRAG_MIME = 'application/x-ansnew';
 const SKELETON_ROWS = 8;
@@ -116,6 +117,9 @@ export class FilesPane {
     this.onNewFile = opts.onNewFile || null;
     this.onUpload = opts.onUpload || null;
     this.onOpenEntry = opts.onOpenEntry || null;   // (pane, entry) — Recent tracking
+    this.onColumnsMenu = opts.onColumnsMenu || null; // (event) — list header right-click
+    this.onFindDuplicates = opts.onFindDuplicates || null; // (pane) — toolbar action
+    this.onBulkRename = opts.onBulkRename || null;         // (pane, entries)
 
     this.crumbs = el('div', { class: 'crumbs' });
 
@@ -137,14 +141,35 @@ export class FilesPane {
     this.search = el('input', { type: 'search', class: 'search', placeholder: 'Search this folder…', 'aria-label': 'Search this folder' });
     this.search.addEventListener('input', debounce(() => this.doSearch(this.search.value.trim()), 350));
 
-    this.toolbar = el('div', { class: 'fm-toolbar' }, this.crumbs, this.sortSelect, this.search);
+    // Duplicate scan is folder-scoped, so it belongs with the other
+    // folder-level controls rather than in the selection bar.
+    this.dupBtn = el('button', {
+      class: 'btn icon sm', title: 'Find duplicate files in this folder',
+      'aria-label': 'Find duplicate files in this folder',
+      onclick: () => this.onFindDuplicates && this.onFindDuplicates(this),
+    }, icon('copy'));
+
+    this.toolbar = el('div', { class: 'fm-toolbar' }, this.crumbs, this.sortSelect, this.dupBtn, this.search);
+
+    // File-type filter. Filtering is client-side over the listing the pane
+    // already holds, so a chip click is instant and costs no request.
+    this.filterBar = new FilterBar({
+      onChange: () => { this.viewDirty = true; this.render(); },
+    });
 
     this.listHead = el('div', { class: 'list-head', role: 'row' },
       this.headCell('Name', 'name', 'nm'),
       this.headCell('Size', 'size', 'sz'),
       this.headCell('Modified', 'mtime', 'mt'),
     );
-    if (state.showPerms) this.listHead.appendChild(el('span', { class: 'ow', text: 'Owner' }));
+    this.ownerHead = el('span', { class: 'ow', text: 'Owner' });
+    this.listHead.appendChild(this.ownerHead);
+    // Right-click the header to pick which columns are shown.
+    this.listHead.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (this.onColumnsMenu) this.onColumnsMenu(e);
+    });
+    this.syncColumns();
 
     // The scroll viewport. The header lives outside it (see below) because a
     // sticky header cannot coexist with absolutely-positioned rows.
@@ -159,7 +184,7 @@ export class FilesPane {
     this.list.appendChild(this.spacer);
 
     this.selbar = el('div', { class: 'selbar', hidden: true });
-    this.root = el('div', { class: 'pane' }, this.toolbar, this.listHead, this.list, this.selbar);
+    this.root = el('div', { class: 'pane' }, this.toolbar, this.filterBar.root, this.listHead, this.list, this.selbar);
 
     this.bindDnd();
     this.bindKeys();
@@ -184,6 +209,32 @@ export class FilesPane {
 
   headCell(label, key, cls) {
     return el('span', { class: cls, text: label, role: 'columnheader', onclick: () => this.sortBy(key) });
+  }
+
+  /**
+   * Show/hide the Size, Modified and Owner columns.
+   *
+   * Toggling `hidden` on the header cells and the row cells is enough because
+   * both are fixed-width flex children — the name column simply absorbs the
+   * space, so no CSS grid template has to change.
+   */
+  syncColumns() {
+    this.headCells = this.headCells || {
+      sz: this.listHead.querySelector('.sz'),
+      mt: this.listHead.querySelector('.mt'),
+    };
+    const { sz, mt } = this.headCells;
+    if (sz) sz.hidden = !state.cols.size;
+    if (mt) mt.hidden = !state.cols.mtime;
+    if (this.ownerHead) this.ownerHead.hidden = !state.cols.owner;
+  }
+
+  /** Refresh the filter bar's counts and extension list for the current listing. */
+  syncFilterBar() {
+    this.filterBar.setLocation(this.loc.mount, this.loc.path);
+    this.filterBar.update(this.entries);
+    this.filterBar.applyRemembered();
+    this.viewDirty = true;
   }
 
   /* ================================================================ data */
@@ -216,6 +267,7 @@ export class FilesPane {
       this.loc = { mount, path: data.path };
       this.mountInfo = data.mount;
       this.setEntries(data.entries || []);
+      this.syncFilterBar();
       if (pushHistory && this.onNavigate) this.onNavigate(this.loc);
       if (!sameLoc) this.resetViewport();
 
@@ -299,6 +351,7 @@ export class FilesPane {
   /** Rebuild entries/view from byPath and repaint, holding the scroll anchor. */
   commitLocal() {
     this.entries = [...this.byPath.values()];
+    this.syncFilterBar();
     this.viewDirty = true;
     // Drop selections whose row no longer exists.
     for (const p of [...this.selected]) {
@@ -353,7 +406,12 @@ export class FilesPane {
     if (!this.viewDirty) return this._view;
     const { key, dir } = state.sort;
     const mul = dir === 'asc' ? 1 : -1;
-    const arr = [...this.entries].sort((a, b) => {
+    // The type filter is applied before sorting so the sort only ever works on
+    // the rows that will actually be shown.
+    const src = this.filterBar && this.filterBar.isActive
+      ? this.entries.filter((e) => matches(e, this.filterBar.filter))
+      : this.entries;
+    const arr = [...src].sort((a, b) => {
       if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
       let r = 0;
       if (key === 'size') r = (a.size || 0) - (b.size || 0);
@@ -382,6 +440,7 @@ export class FilesPane {
       if (this.destroyed || seq !== this.searchSeq) return;
       const anchor = this.captureAnchor();
       this.setEntries(data.results || []);
+      this.syncFilterBar();
       this.render({ anchor });
     } catch (e) {
       if (seq !== this.searchSeq) return;
@@ -434,7 +493,10 @@ export class FilesPane {
       for (const node of this.rendered.values()) this.releaseNode(node);
       this.rendered.clear();
       this.spacer.style.height = '0px';
-      this.showEmpty(true);
+      // "No files of this type" is a different message from "this folder is
+      // empty": one offers a way out (clear the filter), the other offers
+      // upload. Showing the wrong one makes the pane look broken.
+      this.showEmpty(true, this.entries.length > 0 && !!(this.filterBar && this.filterBar.isActive));
       return;
     }
     this.showEmpty(false);
@@ -608,9 +670,18 @@ export class FilesPane {
     setIcon(ico, iconFor(entry));
     nm.textContent = entry.name;
     nm.title = entry.name;
+    // Row cells follow the same toggles as the header cells; `sz`/`mt`/`ow` are
+    // inline-flex-able spans, so `hidden` alone is not reliably enough — belt
+    // and braces with a class the stylesheet can target.
     sz.textContent = entry.type === 'dir' ? '—' : fmtSize(entry.size);
     mt.textContent = fmtDate(entry.mtime);
     if (ow) ow.textContent = `${entry.mode || ''} ${entry.owner || ''}`;
+    const cols = state.cols;
+    for (const [node2, on] of [[sz, cols.size], [mt, cols.mtime], [ow, cols.owner]]) {
+      if (!node2) continue;
+      node2.hidden = !on;
+      node2.style.display = on ? '' : 'none';
+    }
     if (actions && actions._dl) actions._dl.hidden = entry.type === 'dir';
   }
 
@@ -703,6 +774,18 @@ export class FilesPane {
     }
     // Keep the deepest crumb in view on long paths.
     this.crumbs.scrollLeft = this.crumbs.scrollWidth;
+
+    // Make the permission visible where the user is looking, not buried in a
+    // dialog: a read-only drive says so, and it says WHO decided that.
+    const caps = this.mountInfo?.capabilities;
+    if (caps && caps.write === false) {
+      const badge = el('span', {
+        class: 'ro-badge',
+        title: 'You have read-only access to this drive',
+        text: 'Read-only',
+      });
+      this.crumbs.appendChild(badge);
+    }
   }
 
   /** Shimmer placeholders for a cold load. Transient, so not virtualized. */
@@ -737,13 +820,33 @@ export class FilesPane {
     this.paintSelection();
   }
 
-  showEmpty(on) {
-    if (on) {
+  showEmpty(on, filtered = false) {
+    if (this.emptyNode) this.emptyNode.hidden = true;
+    if (this.emptyFilterNode) this.emptyFilterNode.hidden = true;
+    if (!on) return;
+    if (filtered) {
+      if (!this.emptyFilterNode) {
+        this.emptyFilterNode = this.filteredEmptyState();
+        this.list.appendChild(this.emptyFilterNode);
+      }
+      this.emptyFilterNode.hidden = false;
+    } else {
       if (!this.emptyNode) { this.emptyNode = this.emptyState(); this.list.appendChild(this.emptyNode); }
       this.emptyNode.hidden = false;
-    } else if (this.emptyNode) {
-      this.emptyNode.hidden = true;
     }
+  }
+
+  /** Shown when a filter matches nothing — offers the way out. */
+  filteredEmptyState() {
+    const box = el('div', { class: 'empty-state' },
+      icon('search', 'empty-ico'),
+      el('div', { class: 'empty-title', text: 'No files of this type' }),
+      el('div', { class: 'empty-sub muted', text: 'Everything in this folder is hidden by the current filter.' }),
+    );
+    const clear = el('button', { class: 'btn primary', text: 'Clear filter' });
+    clear.addEventListener('click', () => this.filterBar.set({ category: 'all', ext: '' }));
+    box.appendChild(el('div', { class: 'empty-actions' }, clear));
+    return box;
   }
 
   emptyState() {

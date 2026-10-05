@@ -195,3 +195,14 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     version    VARCHAR(64) PRIMARY KEY,
     applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Tracks files dropped into the NAS SMB inbox so the watcher imports each once.
+CREATE TABLE IF NOT EXISTS nas_inbox (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    path        VARCHAR(1024) NOT NULL,
+    size        BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    status      VARCHAR(16) NOT NULL DEFAULT 'done',
+    imported_at BIGINT NOT NULL DEFAULT 0,
+    UNIQUE KEY uq_nas_inbox_path (path(768))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_nas_inbox_status ON nas_inbox(status);

@@ -18,8 +18,15 @@ final class Routes
         // ---- bootstrap & auth (no session requirement beyond start) ----
         $r->get('/api/bootstrap', fn($req) => BootstrapController::bootstrap($req, $session));
         $r->post('/api/auth/login', fn($req) => AuthController::login($req, $session));
+                $r->post('/api/auth/2fa', fn($req) => AuthController::verifyTwoFactor($req, $session));
+        $r->get('/api/auth/2fa', fn($req) => AuthController::twoFactorStatus($req, $session));
+        $r->post('/api/auth/2fa/setup', fn($req) => AuthController::twoFactorSetup($req, $session));
+        $r->post('/api/auth/2fa/confirm', fn($req) => AuthController::twoFactorConfirm($req, $session));
+        $r->post('/api/auth/2fa/disable', fn($req) => AuthController::twoFactorDisable($req, $session));
         $r->post('/api/auth/logout', fn($req) => AuthController::logout($req, $session));
         $r->post('/api/auth/password', fn($req) => AuthController::changePassword($req, $session));
+        // Re-authenticate before a destructive action (drive disconnect, delete, …).
+        $r->post('/api/auth/confirm', fn($req) => AuthController::confirmSensitive($req, $session));
 
         // ---- filesystem ----
         $r->get('/api/mounts', fn($req) => MountController::listForUser($req, $session));
@@ -32,6 +39,7 @@ final class Routes
         $r->post('/api/fs/{mount}/delete', fn($req, $m) => FsController::delete($req, $session, $m));
         // Batch variants: one round trip for a whole selection instead of one per item.
         $r->post('/api/fs/{mount}/delete-batch', fn($req, $m) => FsController::deleteBatch($req, $session, $m));
+        $r->post('/api/fs/{mount}/rename-batch', fn($req, $m) => FsController::renameBatch($req, $session, $m));
         $r->post('/api/fs/{mount}/move-batch', fn($req, $m) => FsController::moveBatch($req, $session, $m));
         $r->post('/api/fs/{mount}/copy-batch', fn($req, $m) => FsController::copyBatch($req, $session, $m));
         $r->post('/api/fs/{mount}/archive', fn($req, $m) => FsController::archive($req, $session, $m));
@@ -63,6 +71,17 @@ final class Routes
         $r->post('/api/connections/{id}/test', fn($req, $id) => ConnectionController::test($req, $session, (int) $id));
         $r->delete('/api/connections/{id}', fn($req, $id) => ConnectionController::delete($req, $session, (int) $id));
 
+        // ---- share links (owner CRUD) ----
+        $r->get('/api/shares', fn($req) => ShareController::index($req, $session));
+        $r->post('/api/shares', fn($req) => ShareController::create($req, $session));
+        $r->delete('/api/shares/all', fn($req) => ShareController::clearAll($req, $session));
+        $r->delete('/api/shares/{id}', fn($req, $id) => ShareController::revoke($req, $session, (int) $id));
+        $r->post('/api/shares/{id}/rotate', fn($req, $id) => ShareController::rotate($req, $session, (int) $id));
+
+        // ---- PUBLIC share links: no session, GET only ----
+        $r->get('/s/{token}', fn($req, $t) => ShareController::publicView($req, $session, $t));
+        $r->get('/s/{token}/download', fn($req, $t) => ShareController::publicDownload($req, $session, $t));
+
         // ---- jobs ----
         $r->get('/api/jobs', fn($req) => JobController::list($req, $session));
         $r->post('/api/jobs/{id}/cancel', fn($req, $id) => JobController::cancel($req, $session, $id));
@@ -70,6 +89,9 @@ final class Routes
         // ---- favorites / recent ----
         $r->get('/api/favorites', fn($req) => FavoritesController::list($req, $session));
         $r->post('/api/favorites', fn($req) => FavoritesController::add($req, $session));
+        // /all must be registered as its own pattern: route regexes are
+        // anchored, so DELETE /api/favorites can never swallow it.
+        $r->delete('/api/favorites/all', fn($req) => FavoritesController::clearAll($req, $session));
         $r->delete('/api/favorites', fn($req) => FavoritesController::remove($req, $session));
         $r->get('/api/recent', fn($req) => FavoritesController::recent($req, $session));
         $r->post('/api/recent', fn($req) => FavoritesController::recordRecent($req, $session));
@@ -105,6 +127,9 @@ final class Routes
         $r->delete('/api/admin/connections/{id}', fn($req, $id) => AdminConnectionController::delete($req, $session, (int) $id));
 
         $r->get('/api/admin/audit', fn($req) => AdminAuditController::tail($req, $session));
+
+        // ---- security posture (admin) ----
+        $r->post('/api/admin/security/gate', fn($req) => \App\Auth\SensitiveGate::setToggle($req, $session));
 
         // ---- internal (shared secret; used by ws server on the compose network) ----
         $r->post('/api/internal/ws-ticket', fn($req) => InternalController::consumeTicket($req));

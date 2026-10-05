@@ -15,19 +15,23 @@ use RuntimeException;
  */
 final class FavoritesService
 {
-    public static function addFavorite(AuthContext $user, string $mount, string $path, string $label = ''): array
+    public static function addFavorite(AuthContext $user, string $mount, string $path, string $label = '', string $type = 'file'): array
     {
         $mount = \App\Support\Validator::mountName($mount);
         $path = PathGuard::normalize($path);
         // Must be a mount the user can actually see.
         StorageManager::mountFor($user, $mount);
         $label = mb_substr(trim($label), 0, 120);
+        // The type decides what clicking the pin does: navigate into a folder,
+        // open-and-select a file. Guessing it later would mean a stat per pin
+        // on every sidebar render, so it is stored at pin time.
+        $type = $type === 'dir' ? 'dir' : 'file';
         Database::i()->run(
-            'INSERT INTO favorites (user_id, mount, path, label) VALUES (:u,:m,:p,:l)
-             ON CONFLICT(user_id, mount, path) DO UPDATE SET label = excluded.label',
-            [':u' => $user->id, ':m' => $mount, ':p' => $path, ':l' => $label]
+            'INSERT INTO favorites (user_id, mount, path, label, type) VALUES (:u,:m,:p,:l,:t)
+             ON CONFLICT(user_id, mount, path) DO UPDATE SET label = excluded.label, type = excluded.type',
+            [':u' => $user->id, ':m' => $mount, ':p' => $path, ':l' => $label, ':t' => $type]
         );
-        return ['mount' => $mount, 'path' => $path, 'label' => $label];
+        return ['mount' => $mount, 'path' => $path, 'label' => $label, 'type' => $type];
     }
 
     public static function removeFavorite(AuthContext $user, string $mount, string $path): void
@@ -38,11 +42,29 @@ final class FavoritesService
         );
     }
 
+    /**
+     * Drop every favourite for this user.
+     *
+     * Scoped to the user id in the WHERE clause rather than relying on the
+     * caller having filtered: this is the one favourites operation that is
+     * destructive at scale, so it is worth being explicit.
+     *
+     * @return int rows removed
+     */
+    public static function clearFavorites(AuthContext $user): int
+    {
+        $stmt = Database::i()->run(
+            'DELETE FROM favorites WHERE user_id = :u',
+            [':u' => $user->id]
+        );
+        return $stmt->rowCount();
+    }
+
     /** @return array<int, array<string,mixed>> */
     public static function favorites(AuthContext $user): array
     {
         return Database::i()->all(
-            'SELECT mount, path, label, created_at FROM favorites WHERE user_id = :u ORDER BY created_at DESC',
+            'SELECT mount, path, label, type, created_at FROM favorites WHERE user_id = :u ORDER BY created_at DESC',
             [':u' => $user->id]
         );
     }

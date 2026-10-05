@@ -33,6 +33,15 @@ ES-module frontend, WebSocket layer on Node.js, fully Dockerized.
 - **ws** (Node 20, `ws` + `ssh2`) handles browser WebSockets: authentication via
   short-lived signed tickets, job progress fan-out, notifications, and the optional SSH
   web terminal.
+- **nas** (optional, `--profile nas`) is a small Samba server (Alpine + `samba`) that
+  exposes `<STORAGE_HOST_PATH>/_inbox` as a writable SMB share on TCP 445, so Windows
+  "Map Network Drive" and mobile SMB apps can drop files into the file manager. Files
+  land in the same host bind mount the `local` mount reads, so they appear immediately.
+- **nas-watch** (optional, `--profile nas`) reuses the php image and runs
+  `bin/nas-watch.php`: it polls `_inbox`, and for each stable (fully-copied) file
+  encrypts it in place when `ANSNEW_ENCRYPT_LOCAL=1`, then records it in `nas_inbox`
+  and audits it. Aggregate import throughput is capped at `NAS_INGEST_MBPS` (default 50
+  MB/s) so a bulk drop can't saturate disk.
 - **mariadb** is optional (`--profile mysql`); default database is SQLite (WAL mode) to
   keep self-hosting one-command simple.
 
@@ -96,6 +105,7 @@ ansnew/
 
 1. `GET /api/bootstrap` — establishes session, returns CSRF token, login state, i18n-ish labels, theme.
 2. `POST /api/auth/login` — validates CSRF, checks `login_attempts` lockout (5 fails → exponential backoff), verifies `password_verify`, rotates session ID, regenerates CSRF token, writes audit + `last_login_at`.
+3. **Sensitive-action re-authentication (`SensitiveGate`).** A logged-in session proves identity, not intent. Destructive operations — drive disconnect, connection delete, permanent or trash delete (`fs.delete`), trash empty, clearing all favourites (`favorites.clear`), and revoking all share links (`shares.clear`) — require the account password again. The client calls `POST /api/auth/confirm` with the scope; the server verifies the password (and 2FA if enabled), runs it through the brute-force guard, and mints a short-lived grant (default 60 s, configurable `SENSITIVE_GRANT_TTL`) stored **in the PHP session**, not the browser. Each gated controller calls `SensitiveGate::guard($session, $scope, $permanent)` first; on a missing/expired grant it returns `403 sensitive_required` (a distinct code, so the client can prompt for the password rather than treating it as a denial). Because the grant lives server-side it cannot be forged or skipped by the client. `fs.delete` is conditionally gated by the `security.gate.delete_trash` setting (default on); permanent deletes are always gated. An admin toggle (`POST /api/admin/security/gate`) flips that setting; the effective posture is published in `GET /api/bootstrap` under `sensitive`.
 3. Every API call: `AuthMiddleware` (active session, active user) → `RateLimitMiddleware` (token bucket per user+IP in sqlite) → `RbacMiddleware` (route-declared role) → `CsrfMiddleware` (`X-CSRF-Token` header must match session token for every non-GET).
 4. Session hardening: `session.cookie_httponly=1`, `SameSite=Strict`, `Secure` when HTTPS detected, strict client-side entropy acceptance, idle timeout 30 min, absolute lifetime 12 h, ID rotation on privilege change.
 5. Logout destroys session + regenerates all tokens.
@@ -214,4 +224,5 @@ host binds configured via `.env`.
 | SSRF | HttpAdapter target validation, DNS-resolved IP check, admin allowlist override |
 | protocol abuse | connections are admin-created and per-user granted; internal WS/PHP endpoints require shared secret |
 | privilege escalation | RBAC on every route; mounts grant-scoped; secrets decryptable only server-side |
+| destructive-action abuse (unattended session, stray key) | `SensitiveGate`: password/2FA re-auth required for disconnect/delete/clear, grant held server-side, 60 s TTL, `fs.delete-to-trash` toggleable |
 | info leak | `data/` never web-served; JSON errors generic; audit without secrets |

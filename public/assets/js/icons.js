@@ -1,5 +1,7 @@
 'use strict';
 /* ANSNEW CLOUD icons: inline <use> helpers built from /assets/icons.svg sprite (fetched once). */
+import { categoryOf } from './filters.js';
+
 let spriteLoaded = false;
 let spriteText = '';
 
@@ -29,16 +31,25 @@ export function icon(name, cls = '') {
   return svg;
 }
 
-/** Pick an icon name for an entry returned by the list API. */
+/**
+ * Pick an icon name for an entry returned by the list API.
+ *
+ * The classification itself lives in filters.js so the type chips and the row
+ * icons can never disagree about what a file is.
+ */
 export function iconFor(entry) {
+  if (!entry) return 'file';
   if (entry.type === 'dir') return 'folder';
-  const e = (entry.extension || '').toLowerCase();
-  const mime = entry.mime || '';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif'].includes(e) || mime.startsWith('image/')) return 'image';
-  if (['mp4', 'webm', 'mkv', 'mov', 'avi'].includes(e) || mime.startsWith('video/')) return 'video';
-  if (['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(e) || mime.startsWith('audio/')) return 'audio';
-  if (['zip', 'gz', 'tar', 'tgz', 'bz2', 'xz', '7z', 'rar'].includes(e) || mime.includes('zip') || mime.includes('compressed')) return 'archive';
-  if (e === 'pdf' || mime === 'application/pdf') return 'pdf';
-  if (['js', 'mjs', 'ts', 'json', 'css', 'html', 'htm', 'xml', 'yml', 'yaml', 'sql', 'c', 'cpp', 'h', 'go', 'rs', 'java', 'rb', 'sh', 'md', 'txt', 'log', 'conf', 'toml'].includes(e) || mime.startsWith('text/')) return 'code';
-  return 'file';
+  switch (categoryOf(entry)) {
+    case 'images': return 'image';
+    case 'video': return 'video';
+    case 'audio': return 'audio';
+    case 'archives': return 'archive';
+    case 'documents':
+      // PDFs have their own glyph; the sprite has no generic document icon, so
+      // everything else falls back to the page icon (as it did before).
+      return String(entry.extension || '').toLowerCase() === 'pdf' ? 'pdf' : 'file';
+    case 'code': return 'code';
+    default: return 'file';
+  }
 }

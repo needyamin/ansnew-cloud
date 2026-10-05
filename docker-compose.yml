@@ -93,6 +93,48 @@ services:
     restart: unless-stopped
     networks: [ansnew]
 
+  # --- NAS (SMB) option -----------------------------------------------------
+  # Opt-in network file share. Bring it up with `docker compose --profile nas up -d`
+  # (or set COMPOSE_PROFILES=nas in .env). It exposes the file manager's _inbox
+  # folder as a writable SMB share (TCP 445) so Windows "Map Network Drive" and
+  # mobile SMB apps can drop files straight in; nas-watch then imports them into
+  # the file manager at a rate-limited queue (see NAS_INGEST_MBPS).
+  nas:
+    build:
+      context: .
+      dockerfile: docker/nas/Dockerfile
+    image: ansnew/nas
+    env_file: .env
+    environment:
+      NAS_SHARE_NAME: ${NAS_SHARE_NAME:-ansnew}
+      NAS_USER: ${NAS_USER:-ansnew}
+      NAS_PASS: ${NAS_PASS:-change-me}
+    volumes:
+      - ${STORAGE_HOST_PATH:-./storage-root}:/srv/storage/local
+    ports:
+      - "${NAS_PORT:-445}:445"
+    profiles: ["nas"]
+    restart: unless-stopped
+    networks: [ansnew]
+
+  # Watches _inbox and imports dropped files (encrypt-at-rest + 50 MB/s cap).
+  nas-watch:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    image: ansnew/php
+    env_file: .env
+    environment:
+      APP_ENV: production
+      APP_ROLE: nas-watch
+    entrypoint: ["/entrypoint.sh", "php", "/var/www/app/bin/nas-watch.php"]
+    volumes:
+      - data_volume:/var/www/data
+      - ${STORAGE_HOST_PATH:-./storage-root}:/srv/storage/local
+    profiles: ["nas"]
+    restart: unless-stopped
+    networks: [ansnew]
+
   db:
     image: mariadb:11
     profiles: ["mysql"]

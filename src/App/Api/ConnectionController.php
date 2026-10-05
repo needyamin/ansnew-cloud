@@ -90,6 +90,14 @@ final class ConnectionController
 
     public static function delete(Request $req, SessionManager $session, int $id): Response
     {
+        // A connection holds live remote credentials (S3 keys, FTP passwords).
+        // Deleting one can silently break every drive built on it, so it is
+        // treated as destructive even though no user file is touched.
+        $gated = \App\Auth\SensitiveGate::guard($session, 'connection.delete');
+        if ($gated !== null) {
+            return $gated;
+        }
+
         $user = Guard::requireUser($session);
         ConnectionService::delete($user, $id);
         return Response::ok(['deleted' => true]);

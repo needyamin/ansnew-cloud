@@ -33,6 +33,15 @@ final class Kernel
                 'X-Frame-Options' => 'DENY',
                 'Referrer-Policy' => 'strict-origin-when-cross-origin',
                 'Cache-Control' => 'no-store',
+                // Nothing here needs those capabilities; advertising them as
+                // unavailable removes an attack surface for nothing in return.
+                'Permissions-Policy' => 'geolocation=(), microphone=(), camera=()',
+                // Hardens against tab-nabbing and against other origins reading
+                // these responses, which matters for a file manager.
+                'Cross-Origin-Opener-Policy' => 'same-origin',
+                'Cross-Origin-Resource-Policy' => 'same-origin',
+                // A file manager has no reason to be indexed.
+                'X-Robots-Tag' => 'noindex, nofollow',
             ];
 
             try {
@@ -89,8 +98,17 @@ final class Kernel
                 return $this->finish(Response::error($e->getMessage(), 400, 'bad_request'), $commonHeaders);
             } catch (\RuntimeException $e) {
                 $msg = $e->getMessage();
+                // Services already annotate their exceptions with the intended
+                // HTTP status (403 for permission, 404 for missing). Honour it
+                // instead of sniffing the message text — a 403 that reads
+                // "this drive is read-only for you" contains neither "denied"
+                // nor "forbidden", so the sniffing turned it into a 500 and the
+                // client could not tell a permission problem from a crash.
                 $status = 500;
-                if (str_contains(strtolower($msg), 'not found')) {
+                $code = (int) $e->getCode();
+                if ($code >= 400 && $code <= 599) {
+                    $status = $code;
+                } elseif (str_contains(strtolower($msg), 'not found')) {
                     $status = 404;
                 } elseif (str_contains(strtolower($msg), 'denied') || str_contains(strtolower($msg), 'forbidden')) {
                     $status = 403;

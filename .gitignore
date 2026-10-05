@@ -1,0 +1,29 @@
+# --- secrets & runtime state: never commit -------------------------------
+.env
+.env.*
+!.env.example
+
+# Runtime data volumes (db, sessions, keys, trash, logs)
+data/
+storage-root/
+
+# Local databases / logs
+*.sqlite
+*.sqlite-journal
+*.log
+build.log
+
+# --- dependencies (generated) -------------------------------------------
+vendor/
+node_modules/
+ws-server/node_modules/
+ws-server/npm-debug.log*
+
+# --- editor / OS --------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# --- local AI workspace state (memory, session logs) -------------------
+.workbuddy-ai/

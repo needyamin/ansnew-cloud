@@ -33,6 +33,12 @@ final class TrashController
 
     public static function purge(Request $req, SessionManager $session, string $mount): Response
     {
+        // Purging is the point of no return for something already in the trash.
+        $gated = \App\Auth\SensitiveGate::guard($session, 'trash.empty');
+        if ($gated !== null) {
+            return $gated;
+        }
+
         $user = Guard::requireUser($session);
         $body = $req->json();
         TrashService::purge($user->id, (int) ($body['id'] ?? 0));
@@ -42,6 +48,12 @@ final class TrashController
 
     public static function empty(Request $req, SessionManager $session, string $mount): Response
     {
+        // Emptying the trash destroys everything the user had as a safety net.
+        $gated = \App\Auth\SensitiveGate::guard($session, 'trash.empty');
+        if ($gated !== null) {
+            return $gated;
+        }
+
         $user = Guard::requireUser($session);
         $count = TrashService::emptyForUser($user->id, $mount);
         NotifyService::fsChanged($user->id, [$mount => ['/']], 'trash-empty');
