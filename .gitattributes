@@ -1,0 +1,5 @@
+# Shell scripts must always keep LF endings. A CRLF shebang makes the kernel
+# look for "/bin/sh\r" and the container entrypoint dies with
+# "exec /entrypoint.sh: no such file or directory".
+*.sh text eol=lf
+install.sh text eol=lf

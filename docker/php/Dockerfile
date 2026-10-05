@@ -3,7 +3,9 @@
 # ---------- stage 1: composer dependencies ----------
 FROM composer:2 AS vendor
 WORKDIR /app
-COPY composer.json composer.lock* ./
+# No composer.lock is committed, so copy composer.json alone. (A `composer.lock*`
+# glob would make the build fail on a fresh clone, where no lock file exists.)
+COPY composer.json ./
 # Install runtime deps only; phpseclib is required for the SFTP/SSH adapters.
 # The optimised autoloader is deliberately NOT generated here: this stage has
 # no application sources, so the classmap would be built empty.  It is

@@ -20,6 +20,37 @@ Open the URL from `APP_URL` / `HTTP_PORT` (default <http://localhost:8080>).
 
 ---
 
+## One-line install (fresh Ubuntu / Debian server)
+
+`install.sh` turns a bare server into a running stack: it installs Docker Engine
+and the Compose plugin, fetches the source, writes a production-safe `.env`
+(random admin password, real `APP_URL`, `PASSWORD_MIN_LENGTH` raised from the
+example's throwaway `5`), builds the images, waits for every service to go
+healthy and prints the URL and credentials.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/needyamin/ansnew-cloud/main/install.sh | sudo bash
+```
+
+Already have the files on the server? `sudo ./install.sh` uses that checkout.
+
+Useful flags (see `./install.sh --help` for all of them):
+
+```bash
+sudo ./install.sh --port 8081                 # host port (auto-bumped if busy)
+sudo ./install.sh --dir /opt/ansnew-cloud     # clone target when run standalone
+sudo ./install.sh --storage /srv/ansnew       # host dir for the `local` mount
+sudo ./install.sh --admin-password 's3cret!'  # else: prompted, or random
+sudo ./install.sh --nas                       # also enable the SMB (NAS) profile
+sudo ./install.sh --mysql                     # MariaDB instead of SQLite
+sudo ./install.sh --cn                        # Chinese apt/Docker mirrors
+```
+
+Re-running is safe — an existing `.env` is kept unless `--force-env` is given.
+Credentials are also written to `/root/ANSNEW-CREDENTIALS.txt` (mode 600).
+
+---
+
 ## First login
 
 **Username:** `ADMIN_USER` from your `.env` (default `admin`).
