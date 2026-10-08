@@ -189,11 +189,16 @@ video, run a folder download, and confirm progress appears in real time.
 ```bash
 cd /srv/ansnew-cloud
 ./scripts/backup.sh                    # always take a snapshot first
-git pull --ff-only
+git pull --ff-only                     # without this you rebuild the OLD source
 docker compose build
-docker compose up -d                   # migrations run automatically on boot
+docker compose up -d --force-recreate  # migrations run automatically on boot
 docker compose ps
 ```
+
+`--force-recreate` matters here too: the built tag is always `ansnew/php:latest`,
+so Compose sees an unchanged tag string and may keep the container running the
+previous build. Skipping `git pull` is the other classic failure — `build` then
+happily bakes whatever checkout is on disk.
 
 Migrations are additive and idempotent (`Database::applyAdditiveMigrations()`),
 so an upgrade never drops data. Take a backup anyway — the pre-upgrade snapshot
@@ -209,10 +214,34 @@ and pull:
 ./scripts/backup.sh
 # bump the tags in .env, then:
 docker compose pull
-docker compose up -d --no-build      # --no-build is required: the services also
-                                     # declare a build: context, so without it
-                                     # Compose would rebuild and ignore the pull
+docker compose up -d --no-build --force-recreate
 docker compose ps
+```
+
+Two flags, both required, and both easy to lose:
+
+- `--no-build` — the services also declare a `build:` context, so without it
+  Compose rebuilds locally and ignores what you just pulled.
+- `--force-recreate` — **without this the running container keeps the OLD
+  image.** Compose decides whether to recreate a container by hashing its
+  config, and an unchanged tag *string* hashes the same even when that tag now
+  points at a completely different image. `pull` updates the tag; only
+  `--force-recreate` makes the container actually use it.
+
+> **The `IMAGE_*` defaults are local-only names.** `.env.example` ships
+> `IMAGE_PHP=ansnew/php` etc., which is what `docker compose build` produces
+> locally — those names do not exist on Docker Hub, so `docker compose pull`
+> fails with `pull access denied for ansnew/php, repository does not exist`
+> and downloads nothing. To upgrade from the registry you MUST point them at
+> the published repository, e.g. `IMAGE_PHP=needyamin/ansnew-cloud:php-1.0.0`.
+> On the server also run `docker login` first.
+
+Verify the running container really got the new image — the image ID in
+`docker compose ps` must match `docker images` for the pulled tag:
+
+```bash
+docker compose images          # repo tag per service
+docker inspect -f '{{.Image}}' ansnew-cloud-php-1
 ```
 
 ### Rollback
@@ -229,7 +258,7 @@ docker compose build && docker compose up -d
 ```bash
 # Published images -> revert the tag in .env and pull it back
 #   IMAGE_PHP=youruser/ansnew-cloud:php-1.1.0   (was ...:php-1.2.0)
-docker compose pull && docker compose up -d --no-build
+docker compose pull && docker compose up -d --no-build --force-recreate
 ```
 
 This is why version tags beat `latest` on a real deployment — `latest` has nothing
