@@ -573,9 +573,3 @@ the bytes genuinely changed.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Internals: request flow, storage adapters, job queue, schema |
 
 ---
-
-## License
-
-There is **no `LICENSE` file in this repository yet**, which means it is "all rights
-reserved" by default — nobody may legally reuse it, including via the `install.sh`
-one-liner above. Add a license before inviting outside use.
