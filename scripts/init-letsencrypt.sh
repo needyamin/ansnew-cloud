@@ -54,8 +54,13 @@ LIVE="/etc/letsencrypt/live/${DOMAIN}"
 install -m 0644 "$LIVE/fullchain.pem" "$CERTS/tls.crt"
 install -m 0600 "$LIVE/privkey.pem"   "$CERTS/tls.key"
 
-docker compose exec -T nginx nginx -s reload
+# RESTART, not reload. nginx cannot change ssl_certificate at runtime, and a
+# container that booted without a certificate has a config pointing at the
+# generated placeholder (docker/nginx/40-ansnew-tls.sh) — reloading would keep
+# serving that placeholder forever. Restarting re-runs the startup script, which
+# now finds the real certificate and switches to it. Costs about a second, once.
+docker compose restart nginx
 
-echo "[ansnew] certificate installed for ${DOMAIN} and nginx reloaded"
+echo "[ansnew] certificate installed for ${DOMAIN} and nginx restarted"
 echo "[ansnew] add the nightly renewal job (cron or systemd timer):"
 echo "          0 3 * * *  $(pwd)/scripts/renew-cert.sh >> /var/log/ansnew-cert.log 2>&1"

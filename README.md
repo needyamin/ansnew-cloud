@@ -88,6 +88,13 @@ sudo ./install.sh --domain cloud.example.com          # writes a hardened .env
 ./scripts/init-letsencrypt.sh cloud.example.com you@example.com
 ```
 
+> **The stack boots without a certificate.** nginx would otherwise refuse to
+> start (a TLS listener with no certificate is fatal), which took the whole app
+> down — including the plain-HTTP listener that serves the ACME challenge. If no
+> certificate is mounted it generates a self-signed placeholder and logs a loud
+> warning, so a fresh install always comes up. Install a real one with
+> `./scripts/make-cert.sh` or `./scripts/init-letsencrypt.sh`.
+
 Then add nightly backups and certificate renewal:
 
 ```bash
@@ -511,6 +518,9 @@ ANSNEW_PW=... node tools/realtime-test.mjs      # fs.changed events for every mu
 node tools/marquee-test.mjs                     # drag-to-select: geometry, Ctrl, Esc, auto-scroll
 bash tools/editor-text-policy-test.sh           # which files open in the editor (415 vs 413)
 NODE_PATH=/path/with/jsdom node tools/editor-smoke.mjs   # editor DOM: gutter, save, CRLF/BOM
+
+# Deployment safety (no stack needed — runs throwaway containers on spare ports)
+bash tools/nginx-tls-boot-test.sh               # nginx must boot with NO certificate mounted
 ```
 
 `optimistic-smoke.mjs` and `realtime-test.mjs` are the regression guards for the

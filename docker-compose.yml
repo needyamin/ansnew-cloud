@@ -24,8 +24,15 @@ services:
       # Public HTTPS (TLS terminated by nginx, proxied to the app listener).
       - "${HTTPS_PORT:-443}:8443"
     volumes:
+      # The site config, mounted READ-ONLY as the source of truth. It is copied
+      # to /etc/nginx/conf.d/default.conf at startup by
+      # docker/nginx/40-ansnew-tls.sh, which is what lets the TLS certificate
+      # paths be redirected to a generated placeholder when no certificate is
+      # mounted — otherwise nginx would refuse to start at all.
+      - ./docker/nginx/default.conf:/etc/nginx/ansnew/default.conf:ro
       # TLS material, kept OUTSIDE the project (and outside OneDrive) so the
-      # private key is never cloud-synced. See scripts/make-cert.sh.
+      # private key is never cloud-synced. Read-only on purpose: the container
+      # must not be able to rewrite the key on the host. See scripts/make-cert.sh.
       - ${CERTS_HOST_PATH:-./certs}:/etc/nginx/certs:ro
       # certbot's HTTP-01 challenge directory (read-only into nginx).
       - ${ACME_WEBROOT_HOST_PATH:-./acme-webroot}:/var/www/acme:ro

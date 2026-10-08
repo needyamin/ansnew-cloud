@@ -101,13 +101,27 @@ TRUST_PROXY=true
 
 ## 5. First boot
 
-nginx will not start without a certificate, so create a placeholder first:
-
 ```bash
-./scripts/make-cert.sh          # self-signed, gets nginx booting
 docker compose up -d --build
 docker compose ps               # all services should be healthy
 ```
+
+**nginx starts even with no certificate.** If `CERTS_HOST_PATH` is empty it
+generates a self-signed placeholder at startup and logs a loud warning, so the
+stack always comes up — and the plain-HTTP listener stays reachable, which is what
+lets Let's Encrypt's HTTP-01 challenge be answered at all. (The placeholder lives
+inside the container, so it is regenerated on every recreate: a fresh browser
+warning each time.)
+
+For a stable certificate on the host — this is what `install.sh` does for you:
+
+```bash
+./scripts/make-cert.sh          # self-signed, 10 years; reads CERTS_HOST_PATH from .env
+docker compose restart nginx
+```
+
+`make-cert.sh` refuses to overwrite an existing certificate unless you pass
+`--force`, so it cannot clobber a real one.
 
 Read the generated admin password (only printed once):
 

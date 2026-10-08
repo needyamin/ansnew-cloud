@@ -450,6 +450,35 @@ wait_healthy() {
     return 1
 }
 
+# Create a stable self-signed certificate before the first boot.
+#
+# nginx will happily start without one (it mints a throwaway placeholder —
+# docker/nginx/40-ansnew-tls.sh), but that placeholder lives inside the container
+# and is regenerated on every recreate, so the browser warning would come back
+# each time. A file on the host is stable, and is what init-letsencrypt.sh
+# replaces later.
+ensure_cert() {
+    local dir
+    dir="$(sed -n 's/^CERTS_HOST_PATH=//p' "$APP_DIR/.env" | tail -1 | tr -d '"' | tr -d "'" | tr -d '\r')"
+    dir="${dir:-/etc/ansnew/tls}"
+
+    if [[ -s "$dir/tls.crt" && -s "$dir/tls.key" ]]; then
+        ok "certificate already present in $dir"
+        return 0
+    fi
+    if [[ ! -x "$APP_DIR/scripts/make-cert.sh" ]]; then
+        warn "scripts/make-cert.sh not found — nginx will use a generated placeholder"
+        return 0
+    fi
+    # Pass the path explicitly so it cannot disagree with what .env mounts.
+    if CERTS_HOST_PATH="$dir" "$APP_DIR/scripts/make-cert.sh" >/dev/null 2>&1; then
+        ok "self-signed certificate created in $dir"
+        warn "browsers will warn until you install a real certificate (see docs/DEPLOY.md)"
+    else
+        warn "could not create a certificate — nginx will use a generated placeholder"
+    fi
+}
+
 start_stack() {
     cd "$APP_DIR"
     (( ENABLE_NAS )) && COMPOSE_ARGS+=(--profile nas)
@@ -461,6 +490,9 @@ start_stack() {
     step "Building images (first build compiles PHP extensions — a few minutes)"
     compose build --pull || die "image build failed (see output above)"
     ok "images built"
+
+    step "Ensuring a TLS certificate exists"
+    ensure_cert
 
     step "Starting the stack"
     compose up -d || die "docker compose up failed"
