@@ -14,7 +14,7 @@ services:
     build:
       context: .
       dockerfile: docker/nginx/Dockerfile
-    image: ansnew/nginx
+    image: ${IMAGE_NGINX:-ansnew/nginx}
     ports:
       # The app itself. Published for a local/dev instance; in production keep
       # it closed in the firewall (only 80/443 should be reachable).
@@ -51,7 +51,7 @@ services:
     build:
       context: .
       dockerfile: docker/php/Dockerfile
-    image: ansnew/php
+    image: ${IMAGE_PHP:-ansnew/php}
     env_file: .env
     environment:
       APP_ENV: production
@@ -84,7 +84,7 @@ services:
     build:
       context: .
       dockerfile: docker/php/Dockerfile
-    image: ansnew/php
+    image: ${IMAGE_PHP:-ansnew/php}
     env_file: .env
     environment:
       APP_ENV: production
@@ -109,7 +109,7 @@ services:
     build:
       context: .
       dockerfile: docker/ws/Dockerfile
-    image: ansnew/ws
+    image: ${IMAGE_WS:-ansnew/ws}
     env_file: .env
     environment:
       APP_ROLE: ws
@@ -144,7 +144,7 @@ services:
     build:
       context: .
       dockerfile: docker/nas/Dockerfile
-    image: ansnew/nas
+    image: ${IMAGE_NAS:-ansnew/nas}
     env_file: .env
     environment:
       NAS_SHARE_NAME: ${NAS_SHARE_NAME:-ansnew}
@@ -163,7 +163,7 @@ services:
     build:
       context: .
       dockerfile: docker/php/Dockerfile
-    image: ansnew/php
+    image: ${IMAGE_PHP:-ansnew/php}
     env_file: .env
     environment:
       APP_ENV: production

@@ -185,17 +185,42 @@ Migrations are additive and idempotent (`Database::applyAdditiveMigrations()`),
 so an upgrade never drops data. Take a backup anyway — the pre-upgrade snapshot
 is your rollback.
 
-### Rollback
+### Upgrading from published images
 
-Images are built locally, so rolling back means reverting the code:
+If you deploy pre-built images instead of building on the server (see
+[Docker images](../README.md#docker-images)), set the image references in `.env`
+and pull:
 
 ```bash
+./scripts/backup.sh
+# bump the tags in .env, then:
+docker compose pull
+docker compose up -d --no-build      # --no-build is required: the services also
+                                     # declare a build: context, so without it
+                                     # Compose would rebuild and ignore the pull
+docker compose ps
+```
+
+### Rollback
+
+Two ways, depending on how you deploy:
+
+```bash
+# Built on the server -> revert the code
 git log --oneline -5
 git checkout <previous-commit>
 docker compose build && docker compose up -d
 ```
 
-If a migration did something unexpected, restore the snapshot:
+```bash
+# Published images -> revert the tag in .env and pull it back
+#   IMAGE_PHP=youruser/ansnew-cloud:php-1.1.0   (was ...:php-1.2.0)
+docker compose pull && docker compose up -d --no-build
+```
+
+This is why version tags beat `latest` on a real deployment — `latest` has nothing
+to roll back to. Whichever route you take, keep the pre-upgrade snapshot: if a
+migration did something unexpected, restore it with
 `docker compose exec php php bin/console.php ansnew:restore --from=/backups/<dir> --yes`
 (see [BACKUP-RESTORE.md](BACKUP-RESTORE.md)).
 

@@ -188,8 +188,27 @@ Vanilla ES modules, no build step, no CDN at runtime.
   per-file progress, pause-ish cancel (abort XHR), conflict dialog (overwrite/skip/rename).
 - **Keyboard**: Del, F2, Ctrl+C/X/V/A/F, F5, F3 preview, Alt+←/→ history, Ctrl+Tab tabs,
   Enter open, Backspace up, Ctrl+1…9 jump tab, Esc close dialog/exit preview.
-- **Previews** (sandboxed): images, video/audio, PDF (`<object sandbox>`), text/code with
-  size-capped fetch, markdown (sanitized minimal renderer), hex fallback for unknown.
+- **Previews** (sandboxed): images, video/audio, PDF (`<object sandbox>`), and a hex fallback
+  for binary content. Text and code files do **not** use the read-only preview — they open in
+  the code editor below.
+- **Code editor** (`editor.js`): full-screen monospace editor with a line-number gutter,
+  `Ctrl`+`S` save, Revert, Download, a wrap toggle, a rendered Markdown preview, and a
+  `Ln`/`Col` + line-ending/BOM status bar. Backed by `GET /api/fs/{mount}/text` and
+  `POST /api/fs/{mount}/write` (`FileService::readText()` / `writeText()`).
+  Reads refuse binary content (415 — a NUL sniff over the first 8 KiB, done *before* the
+  size cap so a huge binary falls back to the hex view rather than reporting "too large")
+  and oversize files (413, `EDIT_MAX_BYTES`). Writes reuse the upload blocklist, so
+  protected extensions open read-only, and carry a sha256 of the bytes that were read
+  (`baseHash`) — a concurrent edit is refused with **409** instead of being clobbered.
+  CRLF and a UTF-8 BOM are reported on read and restored on save.
+  **Routing policy:** a file opens in the editor unless there is a named reason not to
+  (a known binary/media extension or MIME type); an unknown or absent extension opens the
+  editor, and the server's 415 is the backstop.
+- **Selection**: click, Ctrl, Shift, Ctrl+A and keyboard navigation, plus a **rubber band** —
+  dragging from empty space selects every row/tile the rectangle covers, with Ctrl to add,
+  Esc to cancel and edge auto-scroll. Intersections are computed from the row *index* using
+  the same pitch the layout uses, not by reading the DOM, so rows outside the render window
+  are selected correctly and no layout is forced per pointermove.
 - **Themes**: CSS custom properties; dark/light + accent; persisted per user (DB) and
   localStorage.
 - **Terminal**: lightweight built-in terminal (line-buffered, ANSI-aware) over the WS
@@ -207,14 +226,26 @@ Everything is environment-first (`.env` consumed by compose):
 | `DB_DRIVER` | `sqlite` (default) or `mysql` |
 | `DB_*` | mysql credentials when enabled |
 | `ADMIN_USER` / `ADMIN_PASSWORD` | bootstrap admin (random printed if unset) |
-| `SESSION_LIFETIME`, `IDLE_TIMEOUT` | session policy |
-| `UPLOAD_MAX_BYTES`, `CHUNK_SIZE` | upload policy |
+| `SESSION_LIFETIME`, `IDLE_TIMEOUT`, `SESSION_SECURE_COOKIE` | session policy |
+| `UPLOAD_MAX_BYTES`, `CHUNK_SIZE` | upload policy (chunked uploads above `CHUNK_SIZE`) |
+| `EDIT_MAX_BYTES` | largest file the code editor will open or save |
 | `RATE_LIMIT_*` | API rate limiting |
+| `TRUST_PROXY` | honour `X-Forwarded-For` for the client IP (rate limit, lockout, audit) |
+| `JOB_LEASE_SECONDS`, `JOB_MAX_ATTEMPTS` | worker crash recovery: lease length, retries before failing |
+| `USAGE_RESCAN_DEBOUNCE` | seconds between automatic usage re-scans of a mount |
 | `SSRF_ALLOW_PRIVATE` | admin opt-in to allow private-network remote connections |
-| `TRASH_ENABLED` | local trash on delete |
+| `TRASH_ENABLED`, `TRASH_RETENTION_DAYS` | local trash on delete |
+| `HTTP_PORT`, `PUBLIC_HTTP_PORT`, `HTTPS_PORT` | published ports: app, ACME+redirect, TLS |
+| `CERTS_HOST_PATH`, `ACME_WEBROOT_HOST_PATH`, `BACKUP_HOST_PATH` | host dirs for TLS material, ACME challenges, backup snapshots |
+| `IMAGE_NGINX`, `IMAGE_PHP`, `IMAGE_WS`, `IMAGE_NAS` | image references — build locally or pull from a registry |
 
-Volumes: `ansnew_data` (runtime), `ansnew_storage` (default local mount root), optional
-host binds configured via `.env`.
+> `App\Config\Config` reads env vars from a **hardcoded whitelist**: a variable read by
+> code but missing from that list silently falls back to its default. Add new keys there
+> as well as to `.env`.
+
+Volumes: `data_volume` (database, encryption keys, logs, temp), `db_volume` (MariaDB,
+`mysql` profile only) and `storage_volume` (default local mount root). Host binds
+(`STORAGE_HOST_PATH`, `CERTS_HOST_PATH`, `BACKUP_HOST_PATH`) are configured in `.env`.
 
 ## 9. Security model (enforced where?)
 

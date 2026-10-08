@@ -1,10 +1,33 @@
 # ANSNEW CLOUD
 
-A self-hosted, desktop-style file manager. Browse, upload, preview, archive and share
-files across local and remote storage from one web UI, with optional encryption at rest.
+A self-hosted, desktop-style file manager. Browse, upload, preview, edit, archive and
+share files across local and remote storage from one web UI, with optional encryption at
+rest.
 
 **Stack:** PHP 8.2-FPM · nginx · Node WebSocket service · PHP background worker ·
 SQLite (default) or MariaDB. Everything runs in Docker Compose.
+
+---
+
+## Features
+
+**Files** — windowed listing (thousands of entries with a bounded DOM), Details / List /
+Large-icons views, sort, type filters, search, type-ahead, full keyboard navigation,
+rename, bulk rename, copy / cut / paste, drag-and-drop between panes *and* between drives,
+rubber-band drag-to-select, duplicate finder, favourites and recents.
+
+**Reading and editing** — images, video and audio (custom player with Range seeking), PDF,
+and a **built-in code editor** for any text file (see
+[Built-in code editor](#built-in-code-editor)). Anything genuinely binary falls back to a
+hex view.
+
+**Storage** — local (encrypted at rest) plus S3/R2, FTP/FTPS, SFTP, SMB and WebDAV. Mounts
+are per-user with read/write grants and quotas. Optional SMB share so a LAN can treat it as
+a NAS.
+
+**Operations** — background jobs with progress over WebSocket and crash recovery, streaming
+ZIP downloads for a whole selection, full-drive backup with pause/resume/verify, undo/redo
+history, audit log, share links, TOTP two-factor, and per-drive health/capacity reporting.
 
 ---
 
@@ -157,16 +180,32 @@ All settings live in `.env`. The ones that matter most:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `HTTP_PORT` | `8080` | Port nginx publishes on the host |
 | `APP_URL` | `http://localhost:8080` | Canonical URL; used for same-origin checks |
+| `HTTP_PORT` | `8080` | Port nginx publishes for the app |
+| `PUBLIC_HTTP_PORT` | `80` | Plain-HTTP listener: ACME challenge + redirect to HTTPS |
+| `HTTPS_PORT` | `443` | TLS listener |
+| `CERTS_HOST_PATH` | `/etc/ansnew/tls` | Directory holding `tls.crt` / `tls.key` (mounted read-only) |
+| `SESSION_SECURE_COOKIE` | `true` | Only send the session cookie over HTTPS. Set `false` **only** while testing over plain HTTP |
+| `TRUST_PROXY` | `true` | Honour `X-Forwarded-For`. Leave on when nginx/your own proxy is in front (rate limiting, lockout and the audit log key on the client IP) |
 | `STORAGE_HOST_PATH` | `./storage-root` | Host directory bind-mounted as the default local mount |
+| `BACKUP_HOST_PATH` | `/srv/ansnew-backups` | Host directory that `ansnew:backup` writes snapshots into |
 | `ADMIN_USER` / `ADMIN_PASSWORD` / `ADMIN_EMAIL` | `admin` / *(random)* / — | Bootstrap account (see above) |
-| `PASSWORD_MIN_LENGTH` | `10` | Minimum password length. Lower it only on a throwaway local box (delete the line for production) |
+| `PASSWORD_MIN_LENGTH` | `10` | Minimum password length. Lower it only on a throwaway local box |
 | `DB_DRIVER` | `sqlite` | `sqlite` or `mysql` (needs `--profile mysql`) |
-| `UPLOAD_MAX_BYTES` | `2147483648` | Per-file upload cap (2 GiB) |
 | `ANSNEW_ENCRYPT_LOCAL` | `1` | Encrypt file contents on local mounts |
+| `UPLOAD_MAX_BYTES` | `2147483648` | Per-file upload cap (2 GiB) |
+| `CHUNK_SIZE` | `8388608` | Chunk size for large uploads — keep it under your proxy's body limit |
+| `EDIT_MAX_BYTES` | `5242880` | Largest file the built-in code editor will open or save |
 | `TRASH_ENABLED` / `TRASH_RETENTION_DAYS` | `true` / `30` | Recoverable deletes |
+| `JOB_LEASE_SECONDS` / `JOB_MAX_ATTEMPTS` | `900` / `3` | How long a job may run before its worker is presumed dead, and how many times it is retried before failing |
+| `USAGE_RESCAN_DEBOUNCE` | `30` | Seconds between automatic storage-usage re-scans of the same mount after a change |
 | `SSRF_ALLOW_PRIVATE` | `false` | Allow remote mounts to reach private networks |
+
+The full list, with comments, is in [`.env.example`](.env.example).
+
+> **`.env.example` is complete but the whitelist is not automatic.** `App\Config\Config`
+> reads env vars from a hardcoded list — a variable read by code but missing from that list
+> silently falls back to its default. Add new keys there, not just to `.env`.
 
 ### Secrets are generated for you
 
@@ -246,6 +285,60 @@ Local mounts are sandboxed to `/srv/storage/local`; paths cannot escape it.
 
 ---
 
+## Built-in code editor
+
+Any text or code file opens in a full-screen editor instead of a read-only preview: a
+monospace pane with a line-number gutter, `Ctrl`+`S` save, Revert, Download, a word-wrap
+toggle, a rendered preview for Markdown, and a status bar showing `Ln`/`Col`, line and
+character counts, the line ending, the BOM and the encoding.
+
+Editing niceties: `Tab` / `Shift`+`Tab` indent and outdent (across a multi-line selection),
+auto-indent on Enter, and `{|}` expands into a block with the caret inside.
+
+**Which files open in it.** The rule is *open it unless there is a named reason not to*: a
+known text extension, or a text MIME type, opens the editor; known media and binary formats
+(images, video, audio, PDF, office documents, archives, executables, fonts, databases) go to
+the viewer instead; and **anything unrecognised — an unknown extension, or none at all —
+opens in the editor.** The server then checks the content for NUL bytes and answers `415`,
+at which point the hex view takes over. So a wrong guess costs one cheap request, never a
+broken editor.
+
+**Safety rails.** Saving is refused for file types the upload policy protects (`.php`,
+`.sh`, `.js`, …) — those open read-only with the reason shown. Files larger than
+`EDIT_MAX_BYTES` (default 5 MiB) are refused with a download link. And the server returns a
+SHA-256 of the bytes it handed you; Save sends it back, so a file changed meanwhile (another
+tab, another device, a background job) is **never** silently overwritten — you get a conflict
+prompt offering *Reload* or *Keep editing*.
+
+> Saving preserves what a browser `<textarea>` would otherwise destroy: the original **CRLF**
+> line endings and a **UTF-8 BOM** are recorded on load and restored on save.
+
+---
+
+## Large uploads (and Cloudflare Tunnel)
+
+Uploads over `CHUNK_SIZE` (default 8 MiB) are **chunked automatically**: the browser slices
+the file, posts the pieces concurrently, and the server reassembles them into one file.
+Chunked uploads are **resumable** — re-selecting the same file re-uses the session and sends
+only the missing chunks — and each chunk is verified by size, with the assembled file
+checked against the total size and (optionally) a client-supplied SHA-256.
+
+This matters behind a proxy with a per-request body limit. Cloudflare Tunnel on the Free
+plan caps a request body at 100 MB, which cannot be raised; the default 8 MiB chunks sit
+comfortably under it with no configuration:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CHUNK_SIZE` | `8388608` | Bytes per chunk. Raise it for fewer requests, but keep it well under your proxy's limit |
+| `UPLOAD_MAX_BYTES` | `2147483648` | Largest single file accepted (2 GiB) |
+| `UPLOAD_TMP_DIR` | `/var/www/data/tmp` | Where chunks are staged before assembly |
+
+> Chunks are staged **unencrypted** while an upload is in flight and are purged by the
+> worker's sweep if an upload is abandoned. Staging lives inside the `data_volume`, not in
+> your storage root.
+
+---
+
 ## NAS (SMB) option
 
 Turn ANSNEW CLOUD into a LAN NAS so Windows "Map Network Drive" and mobile SMB apps
@@ -296,6 +389,87 @@ Long operations (archive, extract, copy, move, delete, folder download, disk usa
 a worker and report progress over WebSocket. Open the job drawer from the topbar to watch
 or cancel them. One worker runs by default, so jobs are processed one at a time.
 
+Jobs are **crash-safe**: a job takes a lease when a worker claims it and renews it as it
+reports progress, so a worker killed mid-run does not leave the row `running` forever — the
+reaper requeues it with exponential backoff, and fails it after `JOB_MAX_ATTEMPTS`.
+Orphaned jobs are also recovered when the worker starts.
+
+---
+
+## Docker images
+
+Four images, one per role. `php` is shared by the `php` (FastCGI), `worker` and
+`mysql-migrate` services.
+
+| Image | Contains | Notes |
+|---|---|---|
+| `ansnew/nginx` | nginx + the baked `public/` assets | The only service publishing host ports |
+| `ansnew/php` | PHP 8.2-FPM + `src/` + `vendor/` | Also runs the worker and the CLI (`bin/console.php`) |
+| `ansnew/ws` | Node WebSocket service | Realtime progress and `fs.changed` events |
+| `ansnew/nas` | Samba + the `_inbox` watcher | Only used with `--profile nas` |
+
+### Build
+
+```bash
+docker compose build            # all four
+docker compose build nginx php  # just the ones you changed
+```
+
+> **`public/` is baked into the nginx *and* php images**, and the composer classmap is
+> generated at build time — so a frontend edit or a new PHP class needs a rebuild, not just
+> a restart. See [Development](#development).
+
+### Publish to your own registry
+
+`scripts/publish-images.sh` builds, tags and pushes all four in one go. Log in first:
+
+```bash
+docker login
+./scripts/publish-images.sh <repository> <version>
+
+# Docker Hub — one repository, a tag per component
+./scripts/publish-images.sh needyamin/ansnew-cloud 1.0.0
+#   -> needyamin/ansnew-cloud:{nginx,php,ws,nas}
+#   -> needyamin/ansnew-cloud:{nginx,php,ws,nas}-1.0.0
+
+# GitHub Container Registry (token needs write:packages)
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u <username> --password-stdin
+./scripts/publish-images.sh ghcr.io/needyamin/ansnew-cloud 1.0.0
+```
+
+`--dry-run` prints every action without touching the registry, `--no-build` reuses the
+images already on disk, and `--no-latest` pushes only the version tags. Docker Hub allows
+only **one** slash in a repository path (`namespace/repository`), which is why this is one
+repository with four tags rather than four nested paths.
+
+Pushing by hand works too — set the four image references in `.env`
+(`IMAGE_NGINX`, `IMAGE_PHP`, `IMAGE_WS`, `IMAGE_NAS`), then:
+
+```bash
+docker compose build
+docker compose push             # pushes every service that has an `image:`
+```
+
+Prefer version tags over `latest` so you have something to roll back to. For a multi-arch
+image (amd64 + arm64) build once per platform and push a manifest list:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -f docker/php/Dockerfile -t youruser/ansnew-cloud:php-1.2.0 --push .
+```
+
+### Deploy from published images (no build on the server)
+
+On the target host, set the same four variables in `.env` and pull instead of build:
+
+```bash
+docker compose pull
+docker compose up -d --no-build
+```
+
+`--no-build` matters: the services still declare a `build:` context, so without it Compose
+would rebuild locally and silently ignore the images you just pulled.
+
 ---
 
 ## Development
@@ -332,16 +506,38 @@ ANSNEW_PW=... node tools/ui-diagnose.mjs        # layout geometry probe
 ANSNEW_PW=... node tools/perf-smoke.mjs         # list windowing, scroll, selection, no-flicker refresh
 ANSNEW_PW=... node tools/optimistic-smoke.mjs   # instant rows, batch ops, rollback, uploads, no reloads
 ANSNEW_PW=... node tools/realtime-test.mjs      # fs.changed events for every mutation type
+
+# Editor and selection (see the notes below about their requirements)
+node tools/marquee-test.mjs                     # drag-to-select: geometry, Ctrl, Esc, auto-scroll
+bash tools/editor-text-policy-test.sh           # which files open in the editor (415 vs 413)
+NODE_PATH=/path/with/jsdom node tools/editor-smoke.mjs   # editor DOM: gutter, save, CRLF/BOM
 ```
 
 `optimistic-smoke.mjs` and `realtime-test.mjs` are the regression guards for the
 "no page refreshes, immediate feedback" behaviour; `perf-smoke.mjs` asserts the
 DOM node count stays bounded on a 1 500-entry folder.
 
+> **Two of these need a real browser or jsdom, and it matters which.** `marquee-test.mjs`
+> drives headless Chrome over the DevTools Protocol (no npm dependencies) and must, because
+> the rubber band is pure geometry — **jsdom has no layout engine, so every
+> `getBoundingClientRect()` there is 0×0** and a marquee test would pass vacuously.
+> `editor-smoke.mjs` uses jsdom, which is the right tool for the editor because that is DOM
+> construction rather than layout; it needs jsdom on `NODE_PATH`.
+>
+> Point Chrome at your binary if it is not at the default path:
+> `node tools/marquee-test.mjs http://localhost:9090 "C:/path/to/chrome.exe"`.
+
 > Note: some containerised environments never deliver WebSocket frames to page
 > scripts, so `optimistic-smoke.mjs` probes for that and skips its realtime
 > assertions rather than failing. `realtime-test.mjs` covers the same ground
 > from Node and works everywhere.
+
+### Repository hygiene
+
+`.gitignore` deliberately covers `certs/`, `backups/` and `acme-webroot/` — Compose falls
+back to those paths **inside the repo** when the matching variable is unset, and they hold
+the TLS private key and the database plus `file.key` / `app.key`. Committing either is
+unrecoverable. Also never commit `.env`, `data/` or `storage-root/`.
 
 ---
 
@@ -368,6 +564,18 @@ the bytes genuinely changed.
 
 ---
 
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Production deployment on a Linux VPS: DNS, firewall, TLS, upgrade and rollback |
+| [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) | What to back up (including the encryption keys), how, and how to restore |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Internals: request flow, storage adapters, job queue, schema |
+
+---
+
 ## License
 
-See `LICENSE` if present. `docs/ARCHITECTURE.md` describes the internals in more detail.
+There is **no `LICENSE` file in this repository yet**, which means it is "all rights
+reserved" by default — nobody may legally reuse it, including via the `install.sh`
+one-liner above. Add a license before inviting outside use.
