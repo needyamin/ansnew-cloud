@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 
 # The base image sets `USER 101`, so apk cannot write its database — drop to root

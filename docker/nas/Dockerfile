@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # ANSNEW CLOUD NAS service: a small Samba server that exposes the file manager's
 # _inbox folder as a writable SMB share, so Windows "Map Network Drive" and mobile
 # SMB apps can drop files straight into the app. Files land in the same host bind

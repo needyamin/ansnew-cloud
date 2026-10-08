@@ -297,6 +297,50 @@ migration did something unexpected, restore it with
 | Certificate not renewed | check the cron entry and `certbot renew --dry-run` |
 | Uploads stall | check `docker compose logs php` and the worker log |
 
+### Build fails at `resolve image config for docker/dockerfile:1`
+
+```
+=> ERROR [nginx] resolve image config for docker-image://docker.io/docker/dockerfile:1
+failed to do request: Head "https://registry-1.docker.io/v2/...": dial tcp ...: i/o timeout
+```
+
+The build host cannot reach Docker Hub. Test it first:
+
+```bash
+curl -sS -m 10 -o /dev/null -w '%{http_code}\n' https://registry-1.docker.io/v2/
+# 401 = reachable (anonymous requests are rejected, that's fine). Anything else
+# (000 / timeout) means egress to the registry is blocked.
+```
+
+Fixes, in order of preference:
+
+1. **Registry mirror** — `/etc/docker/daemon.json`, then `systemctl restart docker`:
+   `{"registry-mirrors": ["https://<your-mirror>"]}`. Alibaba Cloud gives every
+   account a private mirror URL at cr.console.aliyun.com; `https://docker.m.daocloud.io`
+   is a common public one. Mirrors come and go — always test one before relying on it.
+2. **Proxy** — if the host needs a proxy to reach the internet, Docker does NOT
+   inherit shell env vars. Create `/etc/systemd/system/docker.service.d/http-proxy.conf`
+   with `HTTPS_PROXY=...` / `NO_PROXY=...`, then `systemctl daemon-reload && systemctl
+   restart docker`.
+3. **Skip the build entirely** — images are published to Docker Hub, so pull instead
+   of building (see *Upgrading from published images*). This needs registry access
+   too, but only for your own repository.
+4. **No registry access at all** — build where the network works and ship the tarball:
+   ```bash
+   # on a machine that CAN build
+   docker save ansnew/nginx ansnew/php ansnew/ws ansnew/nas | gzip > ansnew-images.tgz
+   # on the server
+   docker load -i ansnew-images.tgz
+   docker compose up -d --no-build --force-recreate
+   ```
+
+Note that none of the Dockerfiles use BuildKit-only syntax (`COPY --chmod`,
+`--link`, `RUN --mount`, heredocs), so the `# syntax=docker/dockerfile:1` directive
+is not required and has been removed — BuildKit's built-in frontend is used instead,
+which removes one registry round-trip from every build. Base images
+(`alpine`, `php:8.2-fpm-alpine`, `nginxinc/nginx-unprivileged`, `node:20-alpine`,
+`composer:2`) still have to be pulled unless they are already cached or mirrored.
+
 ---
 
 ## Security posture (be aware)

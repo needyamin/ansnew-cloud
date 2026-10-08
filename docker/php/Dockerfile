@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # ---------- stage 1: composer dependencies ----------
 FROM composer:2 AS vendor
 WORKDIR /app
