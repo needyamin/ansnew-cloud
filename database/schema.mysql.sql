@@ -85,6 +85,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     message     VARCHAR(512) NOT NULL DEFAULT '',
     result      MEDIUMTEXT NULL,
     cancel_flag TINYINT(1) NOT NULL DEFAULT 0,
+    attempts         INT NOT NULL DEFAULT 0,
+    max_attempts     INT NOT NULL DEFAULT 3,
+    lease_expires_at BIGINT NULL,                   -- unix epoch
+    next_attempt_at  BIGINT NULL,                   -- unix epoch (retry backoff)
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     started_at  DATETIME NULL,
     finished_at DATETIME NULL,
@@ -194,6 +198,49 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version    VARCHAR(64) PRIMARY KEY,
     applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Full-drive backups. One row per backup run; the per-file manifest is written
+-- as JSONL into the data directory (a whole drive does not belong in one row).
+CREATE TABLE IF NOT EXISTS backups (
+    id            CHAR(36) PRIMARY KEY,
+    user_id       BIGINT UNSIGNED NULL,
+    source_mount  VARCHAR(64)  NOT NULL,
+    source_path   VARCHAR(1024) NOT NULL DEFAULT '/',
+    dest_mount    VARCHAR(64)  NOT NULL,
+    dest_path     VARCHAR(1024) NOT NULL,
+    label         VARCHAR(190) NOT NULL DEFAULT '',
+    status        ENUM('queued','running','paused','done','error','canceled','verifying','verified','verify-failed') NOT NULL DEFAULT 'queued',
+    job_id        CHAR(36) NULL,
+    phase         VARCHAR(32) NOT NULL DEFAULT '',
+    files_total   BIGINT NOT NULL DEFAULT 0,
+    files_done    BIGINT NOT NULL DEFAULT 0,
+    bytes_total   BIGINT NOT NULL DEFAULT 0,
+    bytes_done    BIGINT NOT NULL DEFAULT 0,
+    error         TEXT NULL,
+    manifest      VARCHAR(1024) NULL,
+    started_at    DATETIME NULL,
+    finished_at   DATETIME NULL,
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_backups_user (user_id, created_at),
+    CONSTRAINT fk_backups_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- File-operation history backing Undo/Redo. Each row stores enough to reverse
+-- the operation; `undone` marks a step that has been rolled back (the redo side
+-- of the stack). A new operation truncates that tail, like every editor.
+CREATE TABLE IF NOT EXISTS op_history (
+    id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id     BIGINT UNSIGNED NOT NULL,
+    op          VARCHAR(32)  NOT NULL,
+    mount       VARCHAR(64)  NOT NULL DEFAULT '',
+    summary     VARCHAR(255) NOT NULL DEFAULT '',
+    payload     MEDIUMTEXT   NOT NULL,
+    undone      TINYINT(1)   NOT NULL DEFAULT 0,
+    undone_at   DATETIME     NULL,
+    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_history_user (user_id, id),
+    CONSTRAINT fk_history_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Tracks files dropped into the NAS SMB inbox so the watcher imports each once.

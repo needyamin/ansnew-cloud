@@ -163,6 +163,13 @@ final class Database
             ['users', 'recovery_codes', "TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"],
             // Folder or file — decides what clicking a favourite does.
             ['favorites', 'type', "TEXT NOT NULL DEFAULT 'file'", "VARCHAR(8) NOT NULL DEFAULT 'file'"],
+            // Job crash recovery: a worker that dies mid-job used to leave the
+            // row 'running' forever. These columns carry a lease + retry budget
+            // so the queue can recover itself (see JobService::reapStale).
+            ['jobs', 'attempts', 'INTEGER NOT NULL DEFAULT 0', 'INT NOT NULL DEFAULT 0'],
+            ['jobs', 'max_attempts', 'INTEGER NOT NULL DEFAULT 3', 'INT NOT NULL DEFAULT 3'],
+            ['jobs', 'lease_expires_at', 'INTEGER', 'BIGINT NULL'],
+            ['jobs', 'next_attempt_at', 'INTEGER', 'BIGINT NULL'],
         ];
         foreach ($columns as [$table, $column, $sqliteDef, $mysqlDef]) {
             if ($this->hasColumn($table, $column)) {

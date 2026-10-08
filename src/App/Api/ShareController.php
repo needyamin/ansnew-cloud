@@ -141,16 +141,33 @@ final class ShareController
 
         ShareService::recordAccess((int) $share['id']);
 
-        // Same streaming approach as FsController::download — the body never
-        // buffers in memory.
-        $stream = $adapter->getStream($target);
-        $resp = new Response(200, '');
+        // Same streaming + HTTP Range approach as FsController::download — the
+        // body never buffers in memory, and a shared video/audio file can be
+        // streamed and seeked.
+        $size = (int) ($stat['size'] ?? 0);
+        $range = \App\Support\HttpRange::parse($req->header('range'), $size);
+        if ($range['partial'] && $range['end'] < $range['start']) {
+            $resp = new Response(416, '');
+            $resp->withHeader('Content-Range', 'bytes */' . $size);
+            $resp->withHeader('Accept-Ranges', 'bytes');
+            return $resp;
+        }
+        $start = $range['start'];
+        $end = $range['end'];
+        $length = $size > 0 ? ($end - $start + 1) : 0;
+        $stream = $size > 0 ? $adapter->getStream($target, $start, $end) : $adapter->getStream($target);
+
+        $resp = new Response($range['partial'] ? 206 : 200, '');
         $resp->withHeader('Content-Type', 'application/octet-stream');
-        $resp->withHeader('Content-Length', (string) $stat['size']);
         $resp->withHeader('Content-Disposition', 'attachment; filename="' . self::asciiFallback((string) $stat['name']) . '"; filename*=UTF-8\'\'' . rawurlencode((string) $stat['name']));
         $resp->withHeader('X-Content-Type-Options', 'nosniff');
         $resp->withHeader('Cache-Control', 'no-store');
-        return $resp->withStream($stream, (int) $stat['size']);
+        $resp->withHeader('Content-Length', (string) $length);
+        $resp->withHeader('Accept-Ranges', 'bytes');
+        if ($range['partial']) {
+            $resp->withHeader('Content-Range', 'bytes ' . $start . '-' . $end . '/' . $size);
+        }
+        return $resp->withStream($stream, $length);
     }
 
     private static function asciiFallback(string $name): string

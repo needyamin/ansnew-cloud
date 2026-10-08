@@ -15,13 +15,14 @@ import {
 import { loadSprite, icon } from './icons.js';
 import { toast, toastOk, toastErr, toastWarn, dialog, confirmDialog, promptDialog } from './ui.js';
 import { FilesPane } from './filespane.js';
+import { isTextEntry } from './editor.js';
 import { DetailsPanel } from './details.js';
 import { initJobs, openJobs, closeJobs } from './jobs.js';
 import * as rt from './realtime.js';
 import {
   fsMkdir, fsCreateFile, fsRename, fsArchive, fsExtract,
   fsDeleteBatch, fsMoveBatch, fsCopyBatch,
-  triggerDownload, downloadFolder, consumeDownloadToken,
+  fsList,
   toggleFavorite, trashList, trashRestore, trashPurge, trashEmpty,
 } from './fsops.js';
 import { runUploadsWithUI } from './uploadtray.js';
@@ -29,6 +30,14 @@ import { abortAllUploads } from './upload.js';
 import { runOp, joinPath, dirOf, syntheticEntry, reportBatch, resolveJob } from './mutation.js';
 import { initFsWatch } from './fswatch.js';
 import { renderDrivesView } from './drives.js';
+import { renderThisPcView, loadDrives, propertiesDialog } from './thispc.js';
+import { renderBackupsView, backupDialog } from './backup.js';
+import {
+  recordOp, refreshHistory, undoStep, redoStep, historyLabel, clearHistory,
+} from './history.js';
+import {
+  initDownloads, openTray, downloadSelection, downloadEntriesWithProgress,
+} from './downloads.js';
 import { twoFactorDialog } from './twofactor.js';
 import { shareDialog, renderSharesView } from './sharing.js';
 import { renderSettings } from './settings.js';
@@ -48,10 +57,120 @@ let menuNode = null;      // open context menu
 let shellNodes = {};      // cached shell DOM refs
 let uploadInput = null;
 let folderInput = null;
-let watchTimers = new Map();
 let shellListenersBound = false;
 
 const isAdmin = () => state.user && state.user.role === 'admin';
+
+/* ------------------------------------------------------- navigation tree --
+ * Explorer's left pane: This PC, then each drive, then its folders on demand.
+ * Child folders are fetched only when a branch is opened, and cached, so
+ * re-rendering the sidebar never refetches a subtree.
+ */
+const navOpen = new Set();     // "mount:path" of expanded branches
+const navCache = new Map();    // "mount:path" -> directories
+
+/** Load (once) and cache the subfolders of a directory. */
+async function navLoad(mount, path) {
+  const key = mount + ':' + path;
+  if (navCache.has(key)) return navCache.get(key);
+  let dirs = [];
+  try {
+    const data = await fsList(mount, path, { cacheKey: 'nav:' + key, ttl: 60000 });
+    dirs = (data.entries || []).filter((e) => e.type === 'dir');
+  } catch (_) {
+    dirs = [];
+  }
+  navCache.set(key, dirs);
+  return dirs;
+}
+
+/**
+ * One expandable branch of the tree.
+ * @param {string} mount @param {string} path @param {number} depth
+ */
+function navBranch(mount, path, depth) {
+  const key = mount + ':' + path;
+  const box = el('div', { class: 'nav-branch' });
+
+  const paint = () => {
+    clear(box);
+    if (!navOpen.has(key)) return;
+    const dirs = navCache.get(key);
+    if (dirs === undefined) {
+      box.appendChild(el('div', {
+        class: 'nav-loading muted', text: 'Loading…',
+        style: 'padding-left:' + (12 + depth * 14) + 'px',
+      }));
+      return;
+    }
+    for (const e of dirs) {
+      const childKey = mount + ':' + e.path;
+      const row = el('div', { class: 'nav-row' });
+      const tw = el('button', {
+        class: 'nav-tw', title: 'Expand ' + e.name, 'aria-label': 'Expand ' + e.name,
+        text: navOpen.has(childKey) ? '▾' : '▸',
+      });
+      const btn = el('button', {
+        class: 'side-item nav-item', title: e.path,
+        style: 'padding-left:' + (12 + depth * 14) + 'px',
+      }, icon('folder', 'ico'), el('span', { class: 'lbl', text: e.name }));
+      btn.addEventListener('click', () => navigateTo(mount, e.path));
+      const child = navBranch(mount, e.path, depth + 1);
+      tw.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        if (navOpen.has(childKey)) {
+          navOpen.delete(childKey);
+        } else {
+          navOpen.add(childKey);
+          await navLoad(mount, e.path);
+        }
+        tw.textContent = navOpen.has(childKey) ? '▾' : '▸';
+        child.repaint();
+      });
+      row.append(tw, btn);
+      box.append(row, child);
+    }
+  };
+
+  box.repaint = paint;
+  paint();
+  return box;
+}
+
+/** Preload + remember a branch, used when jumping straight to a deep path. */
+function navReveal(mount, path) {
+  const parts = path.split('/').filter(Boolean);
+  let acc = '';
+  for (const part of parts) {
+    navOpen.add(mount + ':' + (acc || '/'));
+    acc += '/' + part;
+  }
+}
+
+/* ------------------------------------------------------------- view modes */
+
+const VIEW_MODES = [
+  { id: 'details', label: 'Details', icon: 'list' },
+  { id: 'list', label: 'List', icon: 'grid' },
+  { id: 'icons', label: 'Large icons', icon: 'grid' },
+];
+const VIEW_ICON = { details: 'list', list: 'grid', icons: 'grid' };
+
+function viewLabel() {
+  const m = VIEW_MODES.find((x) => x.id === state.viewMode);
+  return m ? m.label : 'Details';
+}
+
+function setViewMode(mode, btn) {
+  state.viewMode = mode;
+  try { localStorage.setItem('ansnew.view', mode); } catch (_) { /* private mode */ }
+  if (pane) pane.setView(mode);
+  if (pane2) pane2.setView(mode);
+  if (btn) {
+    btn.replaceChildren(icon(VIEW_ICON[mode] || 'list'));
+    btn.title = 'View: ' + viewLabel();
+  }
+}
 
 /**
  * Admin tables are wider than a phone. Wrapping them in their own scroll box
@@ -192,13 +311,9 @@ function startApp() {
   initJobs();
   rt.on('job.progress', (d) => {
     if (!d) return;
-    // The push now carries the job's result, so a finished download can be
-    // redeemed straight away instead of polling /api/jobs every 1.2s.
-    if (d.status === 'done' && d.type === 'download-folder') {
-      const token = d.result && d.result.token;
-      if (token) consumeDownloadToken(token);
-      else resolveDownloadToken(d.id);      // fallback for an older server
-    }
+    // 'download-folder' / 'download-selection' are handled by downloads.js,
+    // which streams the finished archive with progress instead of handing a
+    // bare token to the browser.
     if (d.status === 'done' || d.status === 'error') {
       // Hand the job back to whoever was tracking it, so only the rows it
       // actually owns stop being dimmed.
@@ -207,6 +322,22 @@ function startApp() {
     }
   });
   initFsWatch();
+  // Every mutation (here, another tab, another device, or a background job)
+  // invalidates the mount's cached usage server-side, so re-pull the figure.
+  rt.on('fs.changed', (d) => {
+    if (d && d.mounts && typeof d.mounts === 'object') {
+      scheduleUsageRefresh(Object.keys(d.mounts));
+    }
+  });
+  // Downloads, undo/redo and the drive report all need to be live from the
+  // first frame: a user can hit Ctrl+Z or check a drive before any navigation.
+  initDownloads();
+  refreshHistory();
+  // The drive report (capacity) and the usage figures both feed the sidebar's
+  // per-drive size line; repaint once each lands, since the shell is built from
+  // the mounts alone.
+  loadDrives().finally(repaintSidebar);
+  loadUsage().finally(repaintSidebar);
   // Another tab/session adding or renaming a drive must show up here too.
   rt.on('drives.changed', () => refreshSidebarData());
   rt.connect();
@@ -214,6 +345,8 @@ function startApp() {
   // them first and only then build the shell.
   refreshSidebarData().finally(() => {
     renderShell();
+    // Drive capacity / usage may have landed before the shell existed.
+    repaintSidebar();
     if (state.user.mustChangePassword) changePassword(true);
   });
 }
@@ -276,6 +409,144 @@ function renderShell() {
 
 /* ---------------------------------------------------------------- sidebar */
 
+/** Load per-drive usage (bytes/files/dirs) for the sidebar. */
+async function loadUsage() {
+  try {
+    const r = await api.get('/api/usage');
+    state.usageInfo = r.mounts || [];
+  } catch (_) {
+    /* the sidebar simply shows nothing until a later attempt succeeds */
+  }
+  return state.usageInfo || [];
+}
+
+/** Repaint the sidebar if the shell exists yet (no-op during boot). */
+function repaintSidebar() {
+  if (shellNodes.sidebar && typeof shellNodes.sidebar.render === 'function') {
+    shellNodes.sidebar.render();
+  }
+}
+
+function usageFor(mountName) {
+  return (state.usageInfo || []).find((u) => u.mount === mountName) || null;
+}
+
+function driveInfoFor(mountName) {
+  return (state.drivesInfo || []).find((d) => d.mount === mountName) || null;
+}
+
+/**
+ * Used / total figures for one drive, for the sidebar.
+ *
+ * A local drive sits on a real filesystem, so its honest "storage" figure is the
+ * filesystem's used/total. A remote drive has no filesystem to measure, so the
+ * number comes from the cached usage scan of its own contents (null until one
+ * has run).
+ *
+ * @returns {?{used:number,total:?number,pct:?number,kind:string}}
+ */
+function driveUsageParts(mountName) {
+  const cap = (driveInfoFor(mountName) || {}).capacity || {};
+  if (cap.available && typeof cap.used === 'number') {
+    return { used: cap.used, total: cap.total, pct: cap.percent, kind: 'filesystem' };
+  }
+  // /api/usage returns the raw scan result ({used,files,dirs,scannedAt}) with no
+  // `available` flag — unlike /api/drives/info, which wraps it. Treat a numeric
+  // `used` as "we have a figure".
+  const u = usageFor(mountName);
+  const data = u && u.usage;
+  if (data && typeof data.used === 'number') {
+    const total = u.quotaBytes > 0 ? u.quotaBytes : null;
+    return {
+      used: data.used, total, kind: 'drive',
+      pct: total ? Math.min(100, (data.used / total) * 100) : null,
+      // The server flags a snapshot stale as soon as the mount changes; the
+      // figure is still shown (no flash to "Not scanned") but is being redone.
+      stale: !!data.stale,
+    };
+  }
+  return null;
+}
+
+function usageLabel(parts) {
+  if (!parts) {
+    // Distinguish "still loading" from "this drive has never been scanned".
+    return (state.drivesInfo === null && state.usageInfo === null) ? '…' : 'Not scanned';
+  }
+  const used = fmtSize(parts.used);
+  const base = parts.total ? `${used} / ${fmtSize(parts.total)}` : `${used} used`;
+  return parts.stale ? `${base} · updating` : base;
+}
+
+/** Is the cached figure for this mount flagged stale (contents changed)? */
+function usageIsStale(mountName) {
+  const u = usageFor(mountName);
+  return !!(u && u.usage && u.usage.stale);
+}
+
+/**
+ * Make sure a drive's usage figure exists and is current.
+ *
+ * A local drive's figure comes from the filesystem, so it is always live. A
+ * remote drive's figure is a cached scan, so it needs one scan to exist at all
+ * and a fresh one whenever the server flags it stale after a mutation. The scan
+ * runs in the worker, so poll briefly for the result.
+ *
+ * @param {boolean} force re-scan even if the cached figure looks current
+ */
+const usageScanPending = new Set();
+async function ensureDriveUsage(mountName, force = false) {
+  const parts = driveUsageParts(mountName);
+  if (parts && parts.kind === 'filesystem') return;   // live figure, nothing to do
+  const stale = usageIsStale(mountName);
+  if (!force && !stale && parts) return;              // cached figure is current
+  if (usageScanPending.has(mountName)) return;
+  usageScanPending.add(mountName);
+  try {
+    await api.post(`/api/usage/${encodeURIComponent(mountName)}/scan`, {});
+    // Poll for the worker to write the fresh figure. Stop as soon as the server
+    // stops flagging it stale (or we run out of patience).
+    for (let i = 0; i < 8; i++) {
+      await new Promise((res) => setTimeout(res, 1500));
+      await loadUsage();
+      repaintSidebar();
+      if (driveUsageParts(mountName) && !usageIsStale(mountName)) break;
+    }
+  } catch (_) {
+    /* leave the row as-is; the user can retry from This PC */
+  } finally {
+    usageScanPending.delete(mountName);
+  }
+}
+
+/**
+ * A mutation just changed one or more mounts. The server flags their cached
+ * usage stale and queues a re-scan, so refresh our copy and pull in the new
+ * figure. Debounced: one batch operation emits a burst of fs.changed events.
+ */
+let usageRefreshTimer = null;
+const usageRefreshQueue = new Set();
+
+function scheduleUsageRefresh(mounts) {
+  for (const m of mounts) {
+    if (typeof m === 'string' && m) usageRefreshQueue.add(m);
+  }
+  if (usageRefreshTimer) clearTimeout(usageRefreshTimer);
+  usageRefreshTimer = setTimeout(async () => {
+    const pending = [...usageRefreshQueue];
+    usageRefreshQueue.clear();
+    usageRefreshTimer = null;
+    await loadUsage();
+    repaintSidebar();
+    // The server is the authority on whether a figure needs redoing: it flags
+    // the snapshot stale on every mutation. Only chase a fresh scan when it
+    // says so — otherwise the cached number is already correct.
+    for (const m of pending) {
+      if (usageIsStale(m)) ensureDriveUsage(m, true);
+    }
+  }, 800);
+}
+
 function buildSidebar() {
   const sb = el('div', { class: 'sidebar' });
 
@@ -323,19 +594,44 @@ function buildSidebar() {
     sb.appendChild(head);
     applyCollapsed();
 
-    sb.appendChild(el('div', { class: 'side-sec' }, 'Locations'));
+    sb.appendChild(el('div', { class: 'side-sec' }, 'This PC'));
+    const pcBtn = el('button', {
+      class: 'side-item' + (view === 'thispc' ? ' active' : ''),
+      title: 'Drives, capacity and disk health',
+    }, icon('pc', 'ico'), el('span', { class: 'lbl', text: 'This PC' }));
+    pcBtn.addEventListener('click', () => showView('thispc'));
+    sb.appendChild(pcBtn);
+
     if (!state.mounts.length) {
-      sb.appendChild(el('div', { class: 'side-item' }, el('span', { class: 'lbl muted', text: 'No mounts configured' })));
+      sb.appendChild(el('div', { class: 'side-item' }, el('span', { class: 'lbl muted', text: 'No drives configured' })));
     }
     for (const m of state.mounts) {
       const active = view === 'files' && pane && pane.loc.mount === m.name;
-      const btn = el('button', { class: 'side-item' + (active ? ' active' : ''), title: m.label },
+      const parts = driveUsageParts(m.name);
+      const pct = parts && parts.pct !== null && parts.pct !== undefined
+        ? Math.max(0, Math.min(100, Math.round(parts.pct)))
+        : null;
+      const usage = el('span', { class: 'usage' + (parts && parts.stale ? ' stale' : '') },
+        el('span', { class: 'usage-txt', text: usageLabel(parts) }),
+        pct !== null ? el('span', { class: 'usage-bar' }, el('i', { style: 'width:' + pct + '%' })) : null,
+      );
+      const btn = el('button', {
+        class: 'side-item' + (active ? ' active' : ''),
+        title: parts
+          ? `${m.label}\n${usageLabel(parts)}${parts.kind === 'filesystem' ? ' (whole filesystem)' : ''}`
+          : `${m.label}\nUsage not scanned yet`,
+      },
         icon('drive', 'ico'),
-        el('span', { class: 'lbl', text: m.label }),
+        el('span', { class: 'side-meta' },
+          el('span', { class: 'lbl', text: m.label }),
+          usage,
+        ),
       );
       btn.addEventListener('click', () => navigateTo(m.name, '/'));
       mountButtons.set(m.name, btn);
       sb.appendChild(btn);
+      // Expandable folder tree below each drive, loaded on demand.
+      sb.appendChild(navBranch(m.name, '/', 0));
     }
 
     const favs = state.favorites || [];
@@ -417,7 +713,9 @@ function buildSidebar() {
       b.addEventListener('click', fn);
       return b;
     };
+    sb.appendChild(mkTool('pc', 'This PC', () => showView('thispc')));
     sb.appendChild(mkTool('drive', 'Drives', () => showView('drives')));
+    sb.appendChild(mkTool('shield', 'Backups', () => showView('backups')));
     sb.appendChild(mkTool('share', 'Shared links', () => showView('shares')));
     sb.appendChild(mkTool('settings', 'Settings', () => showView('settings')));
     sb.appendChild(mkTool('clock', 'Recent', () => showView('recent')));
@@ -488,6 +786,9 @@ function openFavourite(f) {
 function navigateTo(mount, path) {
   const tab = currentTab();
   if (tab) { tab.mount = mount; tab.path = path; tab.history = []; tab.histIdx = -1; }
+  // First visit to a drive that has never been measured: kick off a usage scan
+  // so its size can show up in the sidebar (no-op once a figure exists).
+  ensureDriveUsage(mount);
   if (view === 'files' && pane) { pane.navigate(mount, path); return; }
   showView('files');   // builds a pane already pointed at tab.mount/tab.path
 }
@@ -551,6 +852,9 @@ function buildTopbar() {
   tb.appendChild(mk('list', 'Menu', () => toggleDrawer(), 'btn icon only-narrow'));
   tb.appendChild(mk('up', 'Up one level (Backspace)', () => { if (pane) pane.goUp(); }));
   tb.appendChild(mk('refresh', 'Refresh (F5)', () => { if (pane) pane.refresh(); }));
+  tb.appendChild(wide(mk('undo', 'Undo (Ctrl+Z)', () => undoLast())));
+  tb.appendChild(wide(mk('redo', 'Redo (Ctrl+Y)', () => redoLast())));
+  tb.appendChild(wide(mk('download', 'Downloads', () => openTray())));
 
   const writableDrive = canDo('create', currentMountInfo());
   if (writableDrive) {
@@ -568,15 +872,14 @@ function buildTopbar() {
 
   tb.appendChild(el('span', { class: 'spacer' }));
 
-  const viewBtn = mk(state.viewMode === 'grid' ? 'list' : 'grid',
-    state.viewMode === 'grid' ? 'List view' : 'Grid view', () => {
-      const next = state.viewMode === 'grid' ? 'list' : 'grid';
-      if (pane) pane.setView(next);
-      if (pane2) pane2.setView(next);
-      viewBtn.replaceChildren(icon(next === 'grid' ? 'list' : 'grid'));
-      // Keep the tooltip in sync, otherwise it lies after the first toggle.
-      viewBtn.title = next === 'grid' ? 'List view' : 'Grid view';
-    });
+  const viewBtn = mk(VIEW_ICON[state.viewMode] || 'list', 'View: ' + viewLabel(), () => {
+    const r = viewBtn.getBoundingClientRect();
+    openMenu(r.right - 220, r.bottom + 6, VIEW_MODES.map((m) => ({
+      label: m.label + (state.viewMode === m.id ? '  ✓' : ''),
+      icon: m.icon,
+      onClick: () => setViewMode(m.id, viewBtn),
+    })));
+  });
   tb.appendChild(wide(viewBtn));
 
   const splitBtn = mk('split', 'Toggle split pane', () => toggleSplit());
@@ -607,9 +910,11 @@ function buildTopbar() {
       { label: 'New folder', icon: 'plus', onClick: () => newFolder() },
       { label: 'New file', icon: 'edit', onClick: () => newFile() },
       { sep: true },
-      { label: state.viewMode === 'grid' ? 'List view' : 'Grid view', icon: state.viewMode === 'grid' ? 'list' : 'grid', onClick: () => viewBtn.click() },
+      { label: 'View: ' + viewLabel(), icon: VIEW_ICON[state.viewMode] || 'list', onClick: () => viewBtn.click() },
       { label: 'Toggle split pane', icon: 'split', onClick: () => splitBtn.click() },
       { label: 'Background jobs', icon: 'job', onClick: () => jobsBtn.click() },
+      { label: 'Downloads', icon: 'download', onClick: () => openTray() },
+      { label: 'Undo history…', icon: 'undo', onClick: () => historyDialog() },
       { label: 'Toggle details panel', icon: 'info', onClick: () => detailsBtn.click() },
       { label: 'Toggle theme', icon: state.theme === 'dark' ? 'sun' : 'moon', onClick: () => themeBtn.click() },
     ]);
@@ -721,6 +1026,16 @@ function showView(name) {
   else if (name === 'shares') renderSharesView(c, { onChanged: () => {} });
   else if (name === 'settings') renderSettings(c, { onChangePassword: changePassword, onOpenView: (v) => showView(v) });
   else if (name === 'drives') renderDrivesView(c, { onChanged: onDrivesChanged });
+  else if (name === 'thispc') renderThisPcView(c, {
+    onOpenDrive: (d) => navigateTo(d.mount, '/'),
+    onBackupDrive: (d) => backupDialog({ mount: d.mount, path: '/' }, () => { showView('backups'); }),
+    onRenameDrive: renameDriveFromPc,
+    onScanDrive: scanDriveFromPc,
+    onDisconnectDrive: disconnectDriveFromPc,
+  });
+  else if (name === 'backups') renderBackupsView(c, {
+    onOpenPath: (m, p) => navigateTo(m, p),
+  });
   else if (name === 'admin-users') renderAdminUsers(c);
   else if (name === 'admin-mounts') renderAdminMounts(c);
   else if (name === 'admin-connections') renderAdminConnections(c);
@@ -971,16 +1286,27 @@ function entryMenu(e, entry, inst) {
 
   const items = [];
   if (!many) {
-    items.push({ label: entry.type === 'dir' ? 'Open' : 'Preview', icon: 'folder', onClick: () => inst.open(entry) });
+    // Text/code files open in the built-in editor, so the label says so.
+    const openLabel = entry.type === 'dir' ? 'Open' : (isTextEntry(entry) ? 'Edit' : 'Preview');
+    items.push({ label: openLabel, icon: isTextEntry(entry) && entry.type !== 'dir' ? 'edit' : 'folder', onClick: () => inst.open(entry) });
     if (entry.type !== 'dir') {
-      items.push({ label: 'Download', icon: 'download', onClick: () => { triggerDownload(inst.loc.mount, entry.path); recordRecent(inst.loc.mount, entry.path, entry, 'download'); } });
+      items.push({
+        label: 'Download', icon: 'download',
+        onClick: () => {
+          downloadEntriesWithProgress(inst.loc.mount, [entry]);
+          recordRecent(inst.loc.mount, entry.path, entry, 'download');
+        },
+      });
     } else {
-      items.push({ label: 'Download as ZIP', icon: 'download', onClick: () => { downloadFolder(inst.loc.mount, entry.path); openJobs(); } });
+      items.push({
+        label: 'Download as ZIP', icon: 'download',
+        onClick: () => { downloadSelection(inst.loc.mount, [entry.path], entry.name + '.zip'); openTray(); },
+      });
     }
     items.push({ sep: true });
   }
   items.push(
-    { label: many ? `Download ${target.length} items` : 'Download', icon: 'download', disabled: anyDir, onClick: () => target.forEach(t => triggerDownload(inst.loc.mount, t.path)) },
+    { label: many ? `Download ${target.length} items` : 'Download', icon: 'download', onClick: () => downloadEntriesWithProgress(inst.loc.mount, target) },
     { label: 'Copy', icon: 'copy', onClick: () => stageClipboard(inst, target, 'copy') },
     { label: 'Cut', icon: 'cut', cap: 'write', disabled: !writable, onClick: () => stageClipboard(inst, target, 'cut') },
     { sep: true },
@@ -997,6 +1323,7 @@ function entryMenu(e, entry, inst) {
       onClick: () => toggleFavouriteFor(inst, entry),
     },
     { sep: true },
+    { label: 'Properties', icon: 'info', disabled: many, onClick: () => entryProperties(inst, entry) },
     { label: 'Share…', icon: 'share', disabled: many, onClick: () => shareDialog({ mount: inst.loc.mount, path: entry.path, name: entry.name, type: entry.type }) },
     { label: 'Delete', icon: 'trash', cap: 'delete', danger: true, disabled: !writable, onClick: () => deleteEntries(inst, target) },
   );
@@ -1013,6 +1340,12 @@ function backgroundMenu(e, inst) {
     { label: 'Paste', icon: 'paste', cap: 'create', disabled: !state.clipboard, onClick: () => pasteInto(inst) },
     { sep: true },
     { label: 'Find duplicates…', icon: 'copy', onClick: () => runDuplicateScan(inst) },
+    { sep: true },
+    { label: 'Undo', icon: 'undo', onClick: () => undoLast() },
+    { label: 'Redo', icon: 'redo', onClick: () => redoLast() },
+    { label: 'Back up this folder…', icon: 'shield', onClick: () => backupDialog({ mount: inst.loc.mount, path: inst.loc.path }, () => showView('backups')) },
+    { label: 'Drive properties', icon: 'info', onClick: () => openDriveProperties(inst.loc.mount) },
+    { sep: true },
     { label: 'Refresh', icon: 'refresh', onClick: () => inst.refresh() },
     { label: 'Select all', icon: 'check', onClick: () => inst.selectAll() },
   ];
@@ -1027,14 +1360,16 @@ async function newFolder(inst = pane) {
   if (!name) return;
   const mount = inst.loc.mount;
   const dir = inst.loc.path;
+  const created = joinPath(dir, name);
   await runOp({
     pane: inst,
     // The row appears before the request is even sent.
-    patch: () => ({ add: [syntheticEntry(joinPath(dir, name), name, 'dir')] }),
+    patch: () => ({ add: [syntheticEntry(created, name, 'dir')] }),
     call: () => fsMkdir(mount, dir, name),
     invalidate: [[mount, dir]],
     okMsg: 'Folder created',
   });
+  recordOp('mkdir', mount, name, { mount, items: [{ path: created }] });
 }
 
 async function newFile(inst = pane) {
@@ -1043,102 +1378,47 @@ async function newFile(inst = pane) {
   if (!name) return;
   const mount = inst.loc.mount;
   const dir = inst.loc.path;
+  const created = joinPath(dir, name);
   await runOp({
     pane: inst,
-    patch: () => ({ add: [syntheticEntry(joinPath(dir, name), name, 'file')] }),
+    patch: () => ({ add: [syntheticEntry(created, name, 'file')] }),
     call: () => fsCreateFile(mount, dir, name),
     invalidate: [[mount, dir]],
     okMsg: 'File created',
   });
+  recordOp('mkdir', mount, name, { mount, items: [{ path: created }] });
 }
 
-/* ---------------------------------------------------------------- undo */
+/* ------------------------------------------------------------ undo / redo */
 
 /**
- * The last reversible operation. Single level on purpose: it matches what the
- * user just did and is honest about what can be undone.
- */
-let lastOp = null;
-
-/** Record an operation as undoable and surface the affordance. */
-function rememberUndo(op, summary) {
-  lastOp = op;
-  if (summary) toast(summary, 'ok', 6000, { label: 'Undo', onClick: undoLast });
-}
-
-/** Can this operation be undone at all? */
-function isUndoable(op) {
-  if (!op) return false;
-  if (op.kind === 'move') return (op.moves || []).length > 0;
-  if (op.kind === 'delete') return op.trash === true && (op.items || []).length > 0;
-  return false;
-}
-
-/**
- * Undo the last operation.
+ * Undo and Redo.
  *
- * Moves and renames are reversed by moving back; deletions are restored from
- * trash (a permanent delete is never offered as undoable — the confirm dialog
- * already says so).
+ * The stack lives on the server (op_history) rather than in a module variable:
+ * it then survives a reload, is shared between tabs, and can undo operations
+ * that need a background job. Every mutating action records itself as it
+ * completes (see recordOp in history.js), so these two functions only have to
+ * ask for the newest step to be reversed or repeated.
  */
 async function undoLast() {
-  const op = lastOp;
-  lastOp = null;
-  if (!isUndoable(op)) { toastWarn('Nothing to undo'); return; }
+  const ok = await undoStep();
+  if (!ok) return;
+  await afterHistoryChange();
+}
 
-  try {
-    if (op.kind === 'move') {
-      // Reverse each pair: move the new path back to its old parent.
-      const byMount = new Map();
-      for (const m of op.moves) {
-        if (!byMount.has(m.mount)) byMount.set(m.mount, []);
-        byMount.get(m.mount).push({ path: m.to });
-      }
-      let restored = 0;
-      for (const [mount, items] of byMount) {
-        const dests = new Set(op.moves.filter(m => m.mount === mount).map(m => dirOf(m.from)));
-        for (const dest of dests) {
-          await fsMoveBatch(mount, items, dest, mount);
-          invalidateList(mount, dest);
-        }
-        restored += items.length;
-        for (const m of op.moves) invalidateList(mount, dirOf(m.to));
-      }
-      toastOk(`Restored ${restored} item(s)`);
-      repaintPanes();
-      return;
-    }
+async function redoLast() {
+  const ok = await redoStep();
+  if (!ok) return;
+  await afterHistoryChange();
+}
 
-    if (op.kind === 'delete') {
-      // Restore from trash by matching the original path.
-      const listing = await trashList(op.mount);
-      const byPath = new Map((listing || []).map(t => [t.original_path, t.id]));
-      let restored = 0;
-      let missing = 0;
-      const parents = new Set();
-      for (const it of op.items) {
-        const id = byPath.get(it.path);
-        if (id === undefined) { missing++; continue; }
-        await trashRestore(op.mount, id);
-        restored++;
-        // The pane showing that folder must re-read it, or the restored item
-        // will not appear until the user navigates away and back.
-        parents.add(dirOf(it.path));
-        invalidateList(op.mount, dirOf(it.path));
-      }
-      if (restored) {
-        toastOk(`Restored ${restored} item(s)`);
-        // Any pane sitting in a folder that got something back must re-read it.
-        for (const p of state.panes) {
-          if (parents.has(p.loc.path)) p.revalidate();
-        }
-      }
-      if (missing) toastWarn(`${missing} item(s) could not be restored — they may already be gone from the trash`);
-      return;
-    }
-  } catch (e) {
-    toastErr(e.message);
-  }
+/** Undo/redo can change several folders at once; make every pane agree. */
+async function afterHistoryChange() {
+  invalidate('list:');
+  repaintPanes();
+  if (pane) pane.scheduleRevalidate(250);
+  if (pane2) pane2.scheduleRevalidate(250);
+  await refreshSidebarData();
 }
 
 async function renameEntry(inst, entry) {
@@ -1160,12 +1440,12 @@ async function renameEntry(inst, entry) {
     invalidate: [[mount, dirOf(entry.path)], [mount, inst.loc.path]],
     okMsg: 'Renamed',
   });
-  // A rename IS a move, so it is undoable the same way.
+  // A rename is recorded as a move: undoing it just moves the item back.
   if (res && !res.skipped) {
-    rememberUndo({
-      kind: 'move',
-      moves: [{ mount, from: entry.path, to: target }],
-    }, 'Renamed');
+    recordOp('rename', mount, entry.name + ' \u2192 ' + name, {
+      mount, destMount: mount,
+      items: [{ from: entry.path, to: (res && res.path) || target }],
+    });
   }
 }
 
@@ -1266,29 +1546,26 @@ async function deleteEntries(inst, entries) {
 
   reportBatch(res, { verb: 'Deleted', openJobs });
   inst.scheduleRevalidate(700);
-  // Only trash-based deletes are undoable; the confirm dialog tells the user
-  // when a delete is permanent.
+  // Only trashed deletes are reversible — a permanent one never pretends to be.
   if (!permanent) {
-    rememberUndo({
-      kind: 'delete',
-      trash: true,
+    recordOp('delete', mount, `${entries.length} item(s)`, {
       mount,
-      items: entries.map(e => ({ path: e.path, name: e.name })),
-    }, `Deleted ${entries.length} item(s)`);
+      items: entries.map((e) => ({ path: e.path, name: e.name })),
+    });
   }
 }
 
 /* ------------------------------------------- selection-bar / drag-drop actions */
 
-/** Download each entry; folders are zipped server-side by a background job. */
+/**
+ * Download a selection.
+ *
+ * Files stream straight out with progress; folders and mixed selections are
+ * packed into one zip on the server first, and the tray follows that job.
+ */
 function downloadEntries(inst, entries) {
   if (!entries || !entries.length) return;
-  let anyFolder = false;
-  for (const e of entries) {
-    if (e.type === 'dir') { downloadFolder(inst.loc.mount, e.path); anyFolder = true; }
-    else triggerDownload(inst.loc.mount, e.path);
-  }
-  if (anyFolder) { toast('Preparing ZIP download…', 'info'); openJobs(); }
+  downloadEntriesWithProgress(inst.loc.mount, entries);
 }
 
 /** Put entries on the internal clipboard for a later Paste. */
@@ -1328,14 +1605,16 @@ async function movePaths(inst, paths, destMount, destDir, srcMount) {
   if (res && skipped) toastWarn(`${skipped} item(s) skipped`);
   if (res) {
     inst.scheduleRevalidate(700);
-    // `done` carries {path, dest}, which is exactly the from→to pair undo needs.
-    // Items handed to a background job (folders, cross-mount) are not undoable
-    // here, because their destination is not known yet.
+    // `done` carries {path, dest}, which is exactly the from→to pair the
+    // history needs. Items handed to a background job (folders, cross-drive)
+    // arrive without a destination yet, so they are not recorded here.
     const moves = (res.done || [])
-      .filter(d => d.dest)
-      .map(d => ({ mount, from: d.path, to: d.dest }));
+      .filter((d) => d.dest)
+      .map((d) => ({ from: d.path, to: d.dest }));
     if (moves.length) {
-      rememberUndo({ kind: 'move', moves }, `Moved ${moves.length} item(s)`);
+      recordOp('move', mount, `${moves.length} item(s)`, {
+        mount, destMount: destMount, items: moves,
+      });
     }
   }
 }
@@ -1386,6 +1665,17 @@ async function pasteInto(inst) {
   reportBatch(res, { verb: isCut ? 'Moved' : 'Copied', openJobs });
   if (isCut && (res.done || []).length) state.clipboard = null;
   inst.scheduleRevalidate(700);
+
+  // Cross-drive pastes run as jobs, so their final paths are not known here —
+  // only the inline part is recorded as reversible.
+  const items = (res.done || [])
+    .filter((d) => d.dest)
+    .map((d) => ({ from: d.path, to: d.dest }));
+  if (items.length) {
+    recordOp(isCut ? 'move' : 'copy', mount, `${items.length} item(s)`, {
+      mount, destMount: mount, items,
+    });
+  }
 }
 
 function pickUpload(inst = pane) {
@@ -2206,32 +2496,130 @@ async function logout() {
 }
 
 /**
- * Fallback path for when a push arrives without the job's result.
+ * The full undo/redo stack.
  *
- * Previously this polled /api/jobs forever at 1.2 s intervals; now it is capped
- * and stops as soon as the job reaches a terminal state. The normal path is the
- * WebSocket push, which already carries the token.
+ * Ctrl+Z and Ctrl+Y cover the common case; this is for when someone wants a
+ * specific step back — the server keeps the last 100 operations.
  */
-function resolveDownloadToken(jobId) {
-  if (watchTimers.has(jobId)) return;
-  const MAX_ATTEMPTS = 12;
-  let attempts = 0;
-  const t = setInterval(async () => {
-    if (++attempts > MAX_ATTEMPTS) {
-      clearInterval(t); watchTimers.delete(jobId);
-      toastErr('Download is taking longer than expected — check Background jobs.');
-      return;
-    }
-    try {
-      const { jobs } = await api.get('/api/jobs?limit=50');
-      const j = jobs.find(x => x.id === jobId);
-      if (!j || (j.status !== 'done' && j.status !== 'error')) return;
-      clearInterval(t); watchTimers.delete(jobId);
-      if (j.status === 'done' && j.result && j.result.token) consumeDownloadToken(j.result.token);
-      else if (j.status === 'error') toastErr('Download failed: ' + (j.message || 'unknown error'));
-    } catch (_) { clearInterval(t); watchTimers.delete(jobId); }
-  }, 1500);
-  watchTimers.set(jobId, t);
+async function historyDialog() {
+  const { entries } = await refreshHistory();
+  if (!entries.length) { toast('No operations recorded yet.', 'info'); return; }
+
+  const list = el('div', { class: 'history-list' });
+  for (const e of entries) {
+    const row = el('div', { class: 'history-row' + (e.undone ? ' undone' : '') },
+      el('span', { class: 'hi-op', text: historyLabel(e) }),
+      el('span', { class: 'muted', text: e.undone ? 'reversed' : 'applied' }),
+      el('span', { style: 'flex:1' }),
+      el('button', {
+        class: 'btn sm', text: e.undone ? 'Redo' : 'Undo',
+        onclick: async () => {
+          if (e.undone) await redoStep(e.id); else await undoStep(e.id);
+          await afterHistoryChange();
+          historyDialog();
+        },
+      }),
+    );
+    list.appendChild(row);
+  }
+
+  dialog({
+    title: 'Undo history',
+    body: [el('p', { class: 'muted', text: 'Operations are kept on the server, so this list survives a reload. Doing something new clears the redo branch.' }), list],
+    buttons: [
+      {
+        label: 'Clear history', danger: true,
+        onClick: async () => { await clearHistory(); },
+      },
+      { label: 'Close' },
+    ],
+  });
+}
+
+/* ------------------------------------------------------- This PC / drives */
+
+/** Back / forward through the active tab's history (Alt+Left, Alt+Right). */
+function goHistory(delta) {
+  const tab = currentTab();
+  if (!tab || !tab.history || !tab.history.length) return;
+  const i = tab.histIdx + delta;
+  if (i < 0 || i > tab.history.length - 1) return;
+  const loc = tab.history[i];
+  tab.histIdx = i;
+  if (pane) pane.navigate(loc.mount, loc.path, false);
+  renderTabs();
+}
+
+/** Properties for one file or folder. */
+async function entryProperties(inst, entry) {
+  let stat = entry;
+  try {
+    stat = await api.get(
+      `/api/fs/${encodeURIComponent(inst.loc.mount)}/stat?path=${encodeURIComponent(entry.path)}`,
+    ) || entry;
+  } catch (_) { /* the listing row is good enough */ }
+
+  const row = (k, v) => el('div', { class: 'prop-row' },
+    el('span', { class: 'prop-k muted', text: k }),
+    el('span', { class: 'prop-v', text: v === null || v === undefined || v === '' ? '—' : String(v) }));
+
+  dialog({
+    title: entry.name + ' Properties',
+    body: [
+      row('Name', entry.name),
+      row('Type', entry.type === 'dir' ? 'Folder' : (stat.mime || (entry.extension ? entry.extension.toUpperCase() + ' file' : 'File'))),
+      row('Size', entry.type === 'dir' ? '—' : fmtSize(stat.size ?? entry.size)),
+      row('Modified', fmtDate(stat.mtime ?? entry.mtime)),
+      row('Location', `${inst.mountInfo?.label || inst.loc.mount}:${dirOf(entry.path)}`),
+      row('Permissions', stat.mode || stat.perms || '—'),
+      row('Owner', stat.owner || '—'),
+    ],
+    buttons: [{ label: 'Close' }],
+  });
+}
+
+/** Drive report for whatever drive a pane is currently showing. */
+async function openDriveProperties(mountName) {
+  const drives = (state.drivesInfo && state.drivesInfo.length)
+    ? state.drivesInfo
+    : await loadDrives();
+  const d = (drives || []).find((x) => x.mount === mountName);
+  if (d) propertiesDialog(d);
+  else toastWarn('No drive information available for ' + mountName);
+}
+
+async function renameDriveFromPc(d) {
+  const label = await promptDialog('New name for this drive', d.label, { title: 'Rename drive', okLabel: 'Rename' });
+  if (!label || label === d.label) return;
+  try {
+    await api.post(`/api/drives/${encodeURIComponent(d.id)}/rename`, { label });
+    toastOk('Drive renamed');
+    await onDrivesChanged();
+    await loadDrives(true);
+    showView('thispc');
+  } catch (e) { toastErr(e.message); }
+}
+
+async function scanDriveFromPc(d) {
+  try {
+    await api.post(`/api/usage/${encodeURIComponent(d.mount)}/scan`, {});
+    toast('Scanning storage in the background…', 'info');
+    openJobs();
+  } catch (e) { toastErr(e.message); }
+}
+
+async function disconnectDriveFromPc(d) {
+  const ok = await confirmDialog(
+    `Disconnect "${d.label}"? Nothing is deleted — the files stay where they are, and the drive can be added back later.`,
+    { title: 'Disconnect drive', danger: true, okLabel: 'Disconnect' },
+  );
+  if (!ok) return;
+  const res = await withSensitive('drive.disconnect', () => api.delete(`/api/drives/${encodeURIComponent(d.id)}`));
+  if (!res) return;
+  toastOk('Drive disconnected — data kept');
+  await onDrivesChanged();
+  await loadDrives(true);
+  showView('thispc');
 }
 
 function globalKeys(e) {
@@ -2242,7 +2630,19 @@ function globalKeys(e) {
   if (view !== 'files' || !pane) return;
   const mod = e.ctrlKey || e.metaKey;
   if (e.key === 'F5') { e.preventDefault(); pane.refresh(); return; }
-  if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); undoLast(); return; }
+  if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undoLast(); return; }
+  if ((mod && e.key.toLowerCase() === 'y') || (mod && e.shiftKey && e.key.toLowerCase() === 'z')) {
+    e.preventDefault(); redoLast(); return;
+  }
+  // Ctrl+L / Alt+D: type a path, like Explorer's address bar.
+  if ((mod && e.key.toLowerCase() === 'l') || (e.altKey && e.key.toLowerCase() === 'd')) {
+    e.preventDefault();
+    if (pane) pane.editAddress();
+    return;
+  }
+  // Alt+Left / Alt+Right: back and forward through this tab's history.
+  if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); goHistory(-1); return; }
+  if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); goHistory(1); return; }
   if (mod && e.key.toLowerCase() === 'b') {
     e.preventDefault();
     if (shellNodes.sidebar && shellNodes.sidebar.toggleCollapse) shellNodes.sidebar.toggleCollapse();

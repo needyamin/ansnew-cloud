@@ -96,12 +96,21 @@ class Response
         if ($this->stream !== null) {
             $out = fopen('php://output', 'wb');
             if ($out !== false) {
-                while (!feof($this->stream)) {
-                    $chunk = fread($this->stream, 262144);
+                // When a length is known, write EXACTLY that many bytes. This is
+                // what makes 206 Partial Content responses correct: the adapter
+                // seeks to the range start and we emit only the requested slice,
+                // so a large media file never has to be sent (or buffered) whole.
+                $remaining = $this->streamLength;
+                while (($remaining === -1 || $remaining > 0) && !feof($this->stream)) {
+                    $want = $remaining === -1 ? 262144 : min(262144, $remaining);
+                    $chunk = fread($this->stream, $want);
                     if ($chunk === false || $chunk === '') {
                         break;
                     }
                     fwrite($out, $chunk);
+                    if ($remaining !== -1) {
+                        $remaining -= strlen($chunk);
+                    }
                 }
                 fclose($out);
             }

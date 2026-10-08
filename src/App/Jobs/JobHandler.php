@@ -18,6 +18,9 @@ final class JobHandler
         'delete' => 1,
         'du' => 1,
         'download-folder' => 1,
+        'download-selection' => 1,
+        'backup' => 1,
+        'backup-verify' => 1,
     ];
 
     public static function run(string $type, array $params, string $jobId): array
@@ -30,6 +33,9 @@ final class JobHandler
             'delete' => 'DeleteHandler',
             'du' => 'DuHandler',
             'download-folder' => 'DownloadFolderHandler',
+            'download-selection' => 'DownloadSelectionHandler',
+            'backup' => 'BackupHandler',
+            'backup-verify' => 'BackupVerifyHandler',
         ];
         $class = __NAMESPACE__ . '\\Handlers\\' . $map[$type];
         if (!class_exists($class)) {

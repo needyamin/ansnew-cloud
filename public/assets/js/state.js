@@ -1,12 +1,29 @@
 'use strict';
 /* Global app state: identity, mounts, theme, tabs, clipboard. */
 
+/**
+ * The three Explorer view modes.
+ *   details — rows with Name / Size / Modified (Explorer "Details")
+ *   list    — compact icon + name, wrapping into columns (Explorer "List")
+ *   icons   — large tiles (Explorer "Large icons")
+ *
+ * Stored values from older builds ("grid", "list") are migrated so a user's
+ * saved choice keeps meaning the same thing.
+ */
+function initialViewMode() {
+  const saved = localStorage.getItem('ansnew.view');
+  if (saved === 'grid') return 'icons';
+  if (saved === 'list') return 'details';
+  if (saved === 'icons' || saved === 'details') return saved;
+  return 'details';
+}
+
 export const state = {
   user: null,
   csrf: '',
   mounts: [],
   theme: 'dark',
-  viewMode: localStorage.getItem('ansnew.view') || 'list',
+  viewMode: initialViewMode(),
   sort: { key: localStorage.getItem('ansnew.sortKey') || 'name', dir: localStorage.getItem('ansnew.sortDir') || 'asc' },
   detailsOpen: localStorage.getItem('ansnew.details') !== '0',
   split: false,
@@ -19,6 +36,14 @@ export const state = {
   favorites: [],      // [{ mount, path, label, created_at }]
   favoriteKeys: new Set(), // "mount:path" — O(1) lookup while rendering rows
   recent: [],         // [{ mount, path, name, action, type, at, ... }]
+
+  // "This PC" report: capacity + type + health per drive (see thispc.js).
+  drivesInfo: null,
+  // Per-drive usage (bytes/files/dirs) from /api/usage. Always fresh — it reads
+  // the cached `du` scan straight from settings, with no health-probe caching.
+  usageInfo: null,
+  // Undo/Redo stack mirror (see history.js).
+  history: { entries: [], canUndo: false, canRedo: false },
 
   sidebarCollapsed: localStorage.getItem('ansnew.sidebar') === '1',
 

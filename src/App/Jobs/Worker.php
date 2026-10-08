@@ -16,12 +16,27 @@ final class Worker
 {
     private int $jobsProcessed = 0;
 
+    /** Job currently executing — lets the CLI alarm renew its lease. */
+    private ?string $currentJobId = null;
+
+    /** Last time stale jobs were reaped (unix time). */
+    private int $lastReap = 0;
+
     public function loop(): never
     {
         error_log('[ansnew] worker started (pid ' . getmypid() . ')');
+        // Anything still marked 'running' was orphaned by a previous crash:
+        // there is only ever one worker container, so it cannot be us.
+        JobService::recoverOrphans();
+
         while (true) {
             $job = JobService::claimNext();
             if ($job === null) {
+                // Reclaim jobs whose worker died while we were idle.
+                if (time() - $this->lastReap >= 30) {
+                    $this->lastReap = time();
+                    JobService::reapStale();
+                }
                 usleep(500_000);
                 continue;
             }
@@ -35,6 +50,12 @@ final class Worker
         }
     }
 
+    /** Id of the job currently running, or null between jobs. */
+    public function currentJobId(): ?string
+    {
+        return $this->currentJobId;
+    }
+
     /** @param array<string,mixed> $job */
     private function execute(array $job): void
     {
@@ -46,6 +67,7 @@ final class Worker
         }
 
         error_log('[ansnew] job start ' . $type . ' ' . $id);
+        $this->currentJobId = $id;
         try {
             $result = JobHandler::run($type, $params, $id);
             JobService::finish($id, $result);
@@ -64,6 +86,8 @@ final class Worker
             }
             // A canceled or failed job may still have changed things part-way.
             $this->notifyChange($job, $type, $params);
+        } finally {
+            $this->currentJobId = null;
         }
     }
 

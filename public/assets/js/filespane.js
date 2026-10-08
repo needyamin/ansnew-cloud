@@ -46,6 +46,19 @@ const MAX_NODES = 400;
 /** Used before the first real measurement; corrected on the first layout. */
 const LIST_ROW_FALLBACK = 30;
 
+/**
+ * Rubber-band selection. The slop is the travel needed before a press on empty
+ * space counts as a drag rather than a click (which just clears the selection).
+ */
+const MARQUEE_SLOP = 4;
+/** Distance from the top/bottom edge at which a drag starts auto-scrolling. */
+const MARQUEE_EDGE = 26;
+/** Auto-scroll speed in px/frame at the very edge. */
+const MARQUEE_MAX_SPEED = 18;
+
+/** True for the two tile-shaped modes (Large icons and List). */
+const isTileMode = () => state.viewMode === 'icons' || state.viewMode === 'list';
+
 /** Monotonic pane id — panes need identity so WS/cache events can target them. */
 let paneSeq = 0;
 
@@ -121,7 +134,25 @@ export class FilesPane {
     this.onFindDuplicates = opts.onFindDuplicates || null; // (pane) — toolbar action
     this.onBulkRename = opts.onBulkRename || null;         // (pane, entries)
 
+    // Explorer-style address bar: breadcrumbs by default, a typeable path on
+    // demand (click it, or Ctrl+L / Alt+D). Typing "other-drive:/docs" jumps
+    // straight across drives.
     this.crumbs = el('div', { class: 'crumbs' });
+    this.addrInput = el('input', {
+      type: 'text', class: 'addr-input', hidden: true,
+      'aria-label': 'Address (drive:/folder)', spellcheck: 'false',
+    });
+    this.addrBar = el('div', { class: 'addrbar' }, this.crumbs, this.addrInput);
+    this.addrBar.addEventListener('click', (e) => {
+      if (e.target.closest('.crumb') || e.target === this.addrInput) return;
+      this.editAddress();
+    });
+    this.addrInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); this.commitAddress(); }
+      else if (e.key === 'Escape') { e.preventDefault(); this.endAddress(); }
+      e.stopPropagation();
+    });
+    this.addrInput.addEventListener('blur', () => this.endAddress());
 
     // Sort control: works in BOTH view modes (grid mode has no list header).
     this.sortSelect = el('select', { class: 'sort-select', 'aria-label': 'Sort by', title: 'Sort by' },
@@ -149,7 +180,7 @@ export class FilesPane {
       onclick: () => this.onFindDuplicates && this.onFindDuplicates(this),
     }, icon('copy'));
 
-    this.toolbar = el('div', { class: 'fm-toolbar' }, this.crumbs, this.sortSelect, this.dupBtn, this.search);
+    this.toolbar = el('div', { class: 'fm-toolbar' }, this.addrBar, this.sortSelect, this.dupBtn, this.search);
 
     // File-type filter. Filtering is client-side over the listing the pane
     // already holds, so a chip click is instant and costs no request.
@@ -183,6 +214,17 @@ export class FilesPane {
     this.spacer = el('div', { class: 'fl-spacer' });
     this.list.appendChild(this.spacer);
 
+    // Rubber-band selection. The overlay lives inside the spacer so it shares
+    // the coordinate space the rows are positioned in — which means it scrolls
+    // with the content for free, and its geometry can be computed from the same
+    // rowPitch/colW numbers fill() uses.
+    this.marquee = el('div', { class: 'marquee', hidden: true, 'aria-hidden': 'true' });
+    this.spacer.appendChild(this.marquee);
+    this.mq = null;              // active drag state, or null
+    this.mqSuppressClick = false;// swallow the click that follows a drag
+    this.mqSuppressTimer = 0;
+    this.mqRaf = 0;              // auto-scroll frame
+
     this.selbar = el('div', { class: 'selbar', hidden: true });
     this.root = el('div', { class: 'pane' }, this.toolbar, this.filterBar.root, this.listHead, this.list, this.selbar);
 
@@ -190,14 +232,17 @@ export class FilesPane {
     this.bindKeys();
     this.bindTouch();
     this.bindScroll();
+    this.bindMarquee();
 
     this.list.addEventListener('contextmenu', (e) => {
       if (e.target.closest('.fitem, .frow')) return;
       e.preventDefault();
       this.menuBackground(e);
     });
-    // Clicking empty space clears the selection (matches every file manager).
+    // Clicking empty space clears the selection (matches every file manager) —
+    // unless that click is the tail of a rubber-band drag, which has just set it.
     this.list.addEventListener('click', (e) => {
+      if (this.consumeSuppressedClick()) return;
       if (e.target.closest('.fitem, .frow, .selbar, .empty-state')) return;
       this.selected.clear();
       this.paintSelection();
@@ -457,7 +502,7 @@ export class FilesPane {
     const padR = parseFloat(cs.paddingRight) || 0;
     const innerW = Math.max(0, this.list.clientWidth - this.padL - padR);
 
-    if (state.viewMode === 'grid') {
+    if (isTileMode()) {
       const min = parseFloat(cs.getPropertyValue('--tile-min')) || 110;
       const gap = parseFloat(cs.getPropertyValue('--tile-gap')) || 4;
       const tileH = parseFloat(cs.getPropertyValue('--tile-h')) || 120;
@@ -472,7 +517,8 @@ export class FilesPane {
       if (!this.rowH) this.rowH = LIST_ROW_FALLBACK;
     }
     this.rowPitch = this.rowH + this.gapY;
-    this.listHead.hidden = state.viewMode !== 'list';
+    // Only Details has a header row; List and Icons are free-flowing.
+    this.listHead.hidden = state.viewMode !== 'details';
   }
 
   /** Total scrollable height of the virtual listing. */
@@ -506,7 +552,7 @@ export class FilesPane {
 
     const vh = this.list.clientHeight || 400;
     const st = this.list.scrollTop;
-    const buf = state.viewMode === 'grid' ? GRID_BUFFER : LIST_BUFFER;
+    const buf = isTileMode() ? GRID_BUFFER : LIST_BUFFER;
 
     const firstRow = Math.max(0, Math.floor(st / this.rowPitch) - buf);
     let lastRow = Math.min(rows - 1, Math.floor((st + vh) / this.rowPitch) + buf);
@@ -534,7 +580,7 @@ export class FilesPane {
 
     // Row height isn't known until a real row exists; correct it once and redo
     // the pass so every row lands on the right pixel.
-    if (state.viewMode === 'list' && !this.rowMeasured) {
+    if (state.viewMode === 'details' && !this.rowMeasured) {
       const probe = this.rendered.values().next().value;
       const h = probe ? probe.offsetHeight : 0;
       if (h > 0) {
@@ -552,7 +598,7 @@ export class FilesPane {
 
   /** Build a node once — including its listeners. */
   createNode() {
-    const node = state.viewMode === 'grid' ? this.buildGridNode() : this.buildRowNode();
+    const node = isTileMode() ? this.buildTileNode() : this.buildRowNode();
     node.style.position = 'absolute';
     node.style.top = '0';
     node.style.left = '0';
@@ -574,7 +620,7 @@ export class FilesPane {
     return node;
   }
 
-  buildGridNode() {
+  buildTileNode() {
     const ico = icon('file', 'ico');
     const visual = el('div', { class: 'visual' }, ico);
     const favMark = icon('star', 'fav-mark');
@@ -613,10 +659,10 @@ export class FilesPane {
   /** Point a node at `entry`, positioning it and refreshing every field. */
   fill(node, entry, i) {
     if (!entry) return;
-    const grid = state.viewMode === 'grid';
+    const tile = isTileMode();
     const row = Math.floor(i / this.cols);
 
-    if (grid) {
+    if (tile) {
       const col = i % this.cols;
       node.style.transform = `translate3d(${Math.round(col * (this.colW + this.gapY))}px, ${Math.round(row * this.rowPitch)}px, 0)`;
       node.style.width = Math.max(0, Math.round(this.colW)) + 'px';
@@ -639,7 +685,7 @@ export class FilesPane {
     this.applySelClass(node);
     this.applyFavMark(node, entry);
 
-    if (grid) {
+    if (tile) {
       const { visual, ico, nm } = node._refs;
       nm.textContent = entry.name;
       if (isThumbnailable(entry)) {
@@ -761,6 +807,46 @@ export class FilesPane {
 
   /* ========================================================= rendering */
 
+  /** Switch the address bar into its editable form. */
+  editAddress() {
+    if (!this.addrInput.hidden) return;
+    this.crumbs.hidden = true;
+    this.addrInput.hidden = false;
+    this.addrInput.value = `${this.loc.mount}:${this.loc.path}`;
+    this.addrInput.focus();
+    // Leave the drive slug selected-ish: most edits are about the folder.
+    const at = this.addrInput.value.indexOf(':') + 1;
+    try { this.addrInput.setSelectionRange(at, this.addrInput.value.length); } catch (_) { /* older browsers */ }
+  }
+
+  /** Leave edit mode without navigating. */
+  endAddress() {
+    if (this.addrInput.hidden) return;
+    this.addrInput.hidden = true;
+    this.crumbs.hidden = false;
+  }
+
+  /** Navigate to whatever is typed in the address bar. */
+  commitAddress() {
+    const raw = this.addrInput.value.trim();
+    this.endAddress();
+    if (!raw) return;
+    const i = raw.indexOf(':');
+    let mount = this.loc.mount;
+    let path = raw;
+    if (i > 0) {
+      const maybeMount = raw.slice(0, i);
+      // Only treat the prefix as a drive when it really is one; otherwise the
+      // colon belongs to a Windows-style path and we keep the current drive.
+      if ((state.mounts || []).some((m) => m.name === maybeMount)) {
+        mount = maybeMount;
+        path = raw.slice(i + 1);
+      }
+    }
+    if (!path.startsWith('/')) path = '/' + path;
+    this.navigate(mount, path);
+  }
+
   renderCrumbs() {
     clear(this.crumbs);
     this.crumbs.appendChild(el('button', { class: 'crumb', text: this.mountInfo?.label || this.loc.mount, onclick: () => this.navigate(this.loc.mount, '/') }));
@@ -800,7 +886,7 @@ export class FilesPane {
 
     const wrap = el('div', { class: 'skeleton-wrap' });
     for (let i = 0; i < SKELETON_ROWS; i++) {
-      wrap.appendChild(state.viewMode === 'grid'
+      wrap.appendChild(isTileMode()
         ? el('div', { class: 'fitem skeleton' }, el('div', { class: 'sk-ico' }), el('div', { class: 'sk-line' }))
         : el('div', { class: 'frow skeleton' }, el('div', { class: 'sk-ico' }), el('div', { class: 'sk-line' })));
     }
@@ -865,6 +951,244 @@ export class FilesPane {
     return box;
   }
 
+  /* ================================================== rubber-band select */
+
+  /**
+   * Drag-to-select, the way a desktop file manager does it.
+   *
+   * Press on empty space and drag: a rectangle follows the pointer and every
+   * row/tile it touches becomes selected, live, as it grows. Ctrl (or Shift)
+   * adds to the selection instead of replacing it; Esc puts it back. Dragging
+   * past the top/bottom edge auto-scrolls, so a marquee can reach beyond the
+   * visible window.
+   *
+   * Two details that matter:
+   *   - it never starts on a row/tile, so the native drag-and-drop of files
+   *     (and plain clicking) are untouched;
+   *   - intersections are computed from the index, not by reading the DOM,
+   *     because only the windowed rows exist — a scrolled-out row still gets
+   *     selected correctly, and no layout is forced on every pointermove.
+   */
+  bindMarquee() {
+    this.onMqMove = (e) => this.marqueeMove(e);
+    this.onMqUp = (e) => this.marqueeUp(e);
+    this.onMqKey = (e) => {
+      if (e.key !== 'Escape' || !this.mq) return;
+      // Capture-phase, so this runs before the pane's own Escape handler. Stop
+      // the event here: "Escape while dragging" means cancel the marquee, and
+      // letting it through would then clearSelection() the restored selection.
+      e.preventDefault();
+      e.stopPropagation();
+      this.marqueeCancel();
+    };
+    this.list.addEventListener('pointerdown', (e) => this.marqueeDown(e));
+  }
+
+  marqueeDown(e) {
+    if (this.destroyed || this.mq) return;
+    if (e.button !== 0) return;                                  // left button only
+    if (e.pointerType && e.pointerType !== 'mouse') return;      // touch has its own path
+    // Never from a row/tile, the selection bar or the empty state.
+    if (e.target.closest('.frow, .fitem, .selbar, .empty-state')) return;
+
+    // A press on the scrollbar must scroll, not start a selection. Clicks on the
+    // scrollbar are reported against the scrolling element with coordinates
+    // beyond its client box.
+    const r = this.list.getBoundingClientRect();
+    if (e.clientX - r.left >= this.list.clientWidth) return;
+    if (e.clientY - r.top >= this.list.clientHeight) return;
+
+    if (!this.view().length) return;                             // nothing to select
+
+    this.mq = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      lastX: e.clientX,
+      lastY: e.clientY,
+      // Ctrl/Shift keep what was already selected; a plain drag starts fresh.
+      additive: !!(e.ctrlKey || e.metaKey || e.shiftKey),
+      base: new Set(this.selected),
+      active: false,
+    };
+    // Bound to window so the drag survives the pointer leaving the pane.
+    window.addEventListener('pointermove', this.onMqMove, { passive: false });
+    window.addEventListener('pointerup', this.onMqUp);
+    window.addEventListener('pointercancel', this.onMqUp);
+    window.addEventListener('keydown', this.onMqKey, true);
+  }
+
+  marqueeMove(e) {
+    const m = this.mq;
+    if (!m || e.pointerId !== m.pointerId) return;
+    m.lastX = e.clientX;
+    m.lastY = e.clientY;
+
+    if (!m.active) {
+      // A few pixels of slack so a plain click on empty space still just clears
+      // the selection instead of flashing a marquee.
+      if (Math.abs(e.clientX - m.startX) < MARQUEE_SLOP && Math.abs(e.clientY - m.startY) < MARQUEE_SLOP) return;
+      m.active = true;
+      this.marquee.hidden = false;
+      this.list.classList.add('marquee-active');
+      this.selected = m.additive ? new Set(m.base) : new Set();
+      this.autoScrollDuringMarquee();
+    }
+    // Stop the browser's own text/image selection taking over.
+    if (e.cancelable) e.preventDefault();
+    this.paintMarquee();
+  }
+
+  marqueeUp(e) {
+    const m = this.mq;
+    if (!m) return;
+    if (e && e.pointerId !== undefined && e.pointerId !== m.pointerId) return;
+    const dragged = m.active;
+    this.endMarquee();
+    if (dragged) {
+      this.suppressNextClick();
+      // The drag painted only classes (cheap); publish the result once, here.
+      this.renderSelbar();
+      if (this.onSelection) this.onSelection(this);
+    }
+  }
+
+  /** Esc during a drag: restore the selection as it was before the press. */
+  marqueeCancel() {
+    const m = this.mq;
+    if (!m) return;
+    const dragged = m.active;
+    this.selected = new Set(m.base);
+    this.endMarquee();
+    this.paintSelection();
+    // The mouseup that follows still produces a click on empty space, and that
+    // would clear the very selection Esc just restored — so swallow it too.
+    if (dragged) this.suppressNextClick();
+  }
+
+  /**
+   * Ignore the click the browser fires after a drag's mouseup. It lands on empty
+   * space, so without this it would immediately clear what the drag selected.
+   *
+   * The flag is consumed by the next click rather than expiring on a 0ms timer:
+   * after Esc the mouseup (and therefore the click) can arrive much later than
+   * the keydown, so a short timer would fire first and let the click through.
+   * The timeout is only a safety net, for a drag that ends without any click.
+   */
+  suppressNextClick() {
+    this.mqSuppressClick = true;
+    clearTimeout(this.mqSuppressTimer);
+    this.mqSuppressTimer = setTimeout(() => { this.mqSuppressClick = false; }, 400);
+  }
+
+  /** @return {boolean} true when this click was the tail of a drag. */
+  consumeSuppressedClick() {
+    if (!this.mqSuppressClick) return false;
+    this.mqSuppressClick = false;
+    clearTimeout(this.mqSuppressTimer);
+    return true;
+  }
+
+  endMarquee() {
+    window.removeEventListener('pointermove', this.onMqMove);
+    window.removeEventListener('pointerup', this.onMqUp);
+    window.removeEventListener('pointercancel', this.onMqUp);
+    window.removeEventListener('keydown', this.onMqKey, true);
+    if (this.mqRaf) { cancelAnimationFrame(this.mqRaf); this.mqRaf = 0; }
+    this.marquee.hidden = true;
+    this.marquee.style.width = '0px';
+    this.marquee.style.height = '0px';
+    this.list.classList.remove('marquee-active');
+    this.mq = null;
+  }
+
+  /** Position the overlay and select everything it covers. */
+  paintMarquee() {
+    const m = this.mq;
+    if (!m || !m.active) return;
+    // The spacer's box already reflects the current scroll offset, so this one
+    // read keeps the rectangle glued to the content while auto-scrolling.
+    const r = this.spacer.getBoundingClientRect();
+    const x0 = m.startX - r.left;
+    const y0 = m.startY - r.top;
+    const x1 = m.lastX - r.left;
+    const y1 = m.lastY - r.top;
+
+    const left = Math.min(x0, x1);
+    const top = Math.min(y0, y1);
+    const w = Math.abs(x1 - x0);
+    const h = Math.abs(y1 - y0);
+
+    this.marquee.style.transform = `translate3d(${Math.round(left)}px, ${Math.round(top)}px, 0)`;
+    this.marquee.style.width = Math.round(w) + 'px';
+    this.marquee.style.height = Math.round(h) + 'px';
+
+    this.selectInRect(left, top, w, h);
+  }
+
+  /**
+   * Geometry of the row/tile at index `i`, in the spacer's coordinate space.
+   * Derived from the same numbers fill() positions with, so it is correct for
+   * rows that are not currently rendered.
+   */
+  rectForIndex(i, tile) {
+    const y = Math.floor(i / this.cols) * this.rowPitch;
+    if (tile) {
+      return { x: (i % this.cols) * (this.colW + this.gapY), y, w: this.colW, h: this.rowH };
+    }
+    return { x: 0, y, w: this.colW, h: this.rowH };
+  }
+
+  selectInRect(left, top, w, h) {
+    const right = left + w;
+    const bottom = top + h;
+    const v = this.view();
+    const tile = isTileMode();
+
+    const next = new Set();
+    if (this.mq.additive) for (const p of this.mq.base) next.add(p);
+
+    for (let i = 0; i < v.length; i++) {
+      const g = this.rectForIndex(i, tile);
+      if (g.x < right && g.x + g.w > left && g.y < bottom && g.y + g.h > top) next.add(v[i].path);
+    }
+
+    // Repainting on every move is fine (it is only a class toggle per visible
+    // node), but rebuilding the selection bar is not — hence `live`.
+    if (next.size === this.selected.size) {
+      let same = true;
+      for (const p of next) { if (!this.selected.has(p)) { same = false; break; } }
+      if (same) return;
+    }
+    this.selected = next;
+    this.paintSelection({ live: true });
+  }
+
+  /** Scroll while the pointer is held near the top/bottom edge. */
+  autoScrollDuringMarquee() {
+    if (this.mqRaf) return;
+    const step = () => {
+      this.mqRaf = 0;
+      const m = this.mq;
+      if (!m || !m.active || this.destroyed) return;
+      const r = this.list.getBoundingClientRect();
+      const over = r.top + MARQUEE_EDGE - m.lastY;          // >0 near/above the top
+      const under = m.lastY - (r.bottom - MARQUEE_EDGE);    // >0 near/below the bottom
+      let dy = 0;
+      if (over > 0) dy = -(Math.min(MARQUEE_EDGE, over) / MARQUEE_EDGE) * MARQUEE_MAX_SPEED;
+      else if (under > 0) dy = (Math.min(MARQUEE_EDGE, under) / MARQUEE_EDGE) * MARQUEE_MAX_SPEED;
+
+      if (dy) {
+        const before = this.list.scrollTop;
+        this.list.scrollTop = before + dy;
+        // Only repaint if the scroll actually moved (it stops at the ends).
+        if (this.list.scrollTop !== before) this.paintMarquee();
+      }
+      this.mqRaf = requestAnimationFrame(step);
+    };
+    this.mqRaf = requestAnimationFrame(step);
+  }
+
   /* ========================================================= selection */
 
   selectOnly(entry) { this.selected.clear(); this.selected.add(entry.path); this.paintSelection(); }
@@ -909,9 +1233,14 @@ export class FilesPane {
   /**
    * Repaint only the nodes that exist. Off-window rows are "painted" by fill()
    * the moment they scroll into view, so the Set stays the source of truth.
+   *
+   * @param {{live?:boolean}} [opts] `live` skips the selection bar and the
+   *        shell notification — used by the rubber band, which repaints on every
+   *        pointermove and publishes the result once when the drag ends.
    */
-  paintSelection() {
+  paintSelection(opts = {}) {
     for (const node of this.rendered.values()) this.applySelClass(node);
+    if (opts.live) return;
     this.renderSelbar();
     if (this.onSelection) this.onSelection(this);
   }
@@ -1179,6 +1508,8 @@ export class FilesPane {
     if (this.listAbort) { try { this.listAbort.abort(); } catch (_) { /* settled */ } this.listAbort = null; }
 
     if (this.touchOff) { this.touchOff(); this.touchOff = null; }
+    if (this.mq) this.endMarquee();          // also unbinds the window listeners
+    if (this.mqSuppressTimer) { clearTimeout(this.mqSuppressTimer); this.mqSuppressTimer = 0; }
     if (this.ro) { this.ro.disconnect(); this.ro = null; }
     if (this.thumbs) { this.thumbs.disconnect(); }
     if (this.scrollRaf) { cancelAnimationFrame(this.scrollRaf); this.scrollRaf = 0; }

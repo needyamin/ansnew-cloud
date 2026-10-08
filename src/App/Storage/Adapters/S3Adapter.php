@@ -53,6 +53,15 @@ final class S3Adapter implements StorageAdapter
             $scheme = 'https';
             $port = $cfg->port > 0 ? $cfg->port : null;
         }
+        // Never carry a scheme's DEFAULT port into the endpoint. curl omits the
+        // default port (443 for https, 80 for http) from the Host header it
+        // actually sends, so if we sign `host:443` the request R2/S3 receives
+        // canonicalises to `host` and the signature can never match
+        // (SignatureDoesNotMatch). The DB always stores port=443 for S3, so this
+        // broke every S3-compatible mount, not just R2.
+        if (($scheme === 'https' && $port === 443) || ($scheme === 'http' && $port === 80)) {
+            $port = null;
+        }
         SsrfGuard::validateHost($host);
 
         $extra = is_array($cfg->extra) ? $cfg->extra : [];
@@ -166,6 +175,13 @@ final class S3Adapter implements StorageAdapter
     public function isDir(string $path): bool
     {
         $prefix = $this->prefixFor($path);
+        // The bucket root is ALWAYS a directory, even when the bucket is empty.
+        // Probing it by prefix would report "not a directory" for an empty bucket
+        // (no keys, no common prefixes) and make the whole drive unlistable —
+        // which is exactly what happens to a freshly-added S3 bucket.
+        if ($prefix === '') {
+            return true;
+        }
         $result = $this->request('GET', '', [
             'list-type' => '2',
             'delimiter' => '/',
@@ -192,7 +208,12 @@ final class S3Adapter implements StorageAdapter
         $this->assertWritable();
         $key = $this->keyFor($path);
 
-        if ($recursive || $this->isDir($path)) {
+        // Descend by prefix ONLY when the path really is a directory. A plain
+        // object passed with $recursive=true (which the permanent-delete path
+        // does for every entry) must delete the object itself: prefixFor()
+        // appends "/", which matches no keys, so the file was silently left
+        // behind while the API still reported success.
+        if ($this->isDir($path)) {
             $prefix = $this->prefixFor($path);
             foreach ($this->allKeys($prefix) as $k) {
                 $this->request('DELETE', $k);
@@ -284,18 +305,16 @@ final class S3Adapter implements StorageAdapter
         $files = 0;
         $dirs = 0;
         $seenDirs = [];
-        foreach ($this->allKeys($this->prefixFor($path)) as $k) {
+        // One paginated listing carries both the size and the key, so a second
+        // pass over the whole prefix would just double the requests.
+        foreach ($this->allObjects($this->prefixFor($path)) as $obj) {
             $files++;
-            $dir = dirname($k);
+            $used += (int) $obj['size'];
+            $dir = dirname((string) $obj['key']);
             if ($dir !== '.' && !isset($seenDirs[$dir])) {
                 $seenDirs[$dir] = true;
                 $dirs++;
             }
-        }
-        // allKeys already collected sizes in a second pass would double the
-        // requests; ask for size in the same listing instead.
-        foreach ($this->allObjects($this->prefixFor($path)) as $obj) {
-            $used += (int) $obj['size'];
         }
         return ['used' => $used, 'files' => $files, 'dirs' => $dirs];
     }
@@ -559,6 +578,13 @@ final class S3Adapter implements StorageAdapter
                 $curlHeaders[] = 'Content-Length: ' . $bodyLength;
                 $options[CURLOPT_HTTPHEADER] = $curlHeaders;
             }
+        }
+        // A HEAD response carries headers but no body. Without NOBODY, curl keeps
+        // waiting for the Content-Length the server advertised and the request
+        // hangs until CURLOPT_TIMEOUT — which broke exists()/stat() and therefore
+        // EVERY upload (the post-PUT stat() is a HEAD) and every conflict check.
+        if ($method === 'HEAD') {
+            $options[CURLOPT_NOBODY] = true;
         }
         curl_setopt_array($ch, $options);
 

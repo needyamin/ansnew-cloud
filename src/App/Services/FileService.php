@@ -108,6 +108,223 @@ final class FileService
         return ['path' => $target, 'name' => $name];
     }
 
+    /**
+     * Read a file as text for the editor.
+     *
+     * Returns the text plus everything the editor needs to write it back
+     * byte-faithfully: the line ending, whether a BOM was present, and a hash of
+     * the original bytes to use as an optimistic-concurrency guard.
+     *
+     * @return array<string,mixed>
+     */
+    public static function readText(AuthContext $user, string $mountName, string $path): array
+    {
+        [$mount, $adapter, $norm] = StorageManager::resolve($user, $mountName, $path);
+        $stat = $adapter->stat($norm);
+        if (($stat['type'] ?? '') !== 'file') {
+            throw new RuntimeException('Not a file', 400);
+        }
+
+        $cap = self::editMaxBytes();
+        $size = (int) ($stat['size'] ?? 0);
+
+        // Sniff the head BEFORE enforcing the size cap. Any file the client
+        // cannot classify by extension is offered to the editor, so a large
+        // binary file (an unknown extension, or a huge .dat) has to fall back to
+        // the hex preview (415) rather than being told "too large to edit"
+        // (413). This also means we read 8 KiB of it, never the whole thing.
+        if ($size > 0 && str_contains(self::readHead($adapter, $norm, self::SNIFF_BYTES), "\0")) {
+            throw new RuntimeException('Not a text file', 415);
+        }
+
+        if ($size > $cap) {
+            throw new RuntimeException('Too large to edit (' . self::humanBytes($cap) . ' limit)', 413);
+        }
+
+        $raw = self::readRaw($adapter, $norm, $cap);
+
+        // Belt and braces: a file that is text for the first 8 KiB but binary
+        // later would otherwise be opened and then saved as mangled bytes.
+        if (str_contains($raw, "\0")) {
+            throw new RuntimeException('Not a text file', 415);
+        }
+
+        $bom = str_starts_with($raw, "\xEF\xBB\xBF");
+        $body = $bom ? substr($raw, 3) : $raw;
+
+        // The text round-trips through a <textarea>, and browsers normalise CRLF
+        // to LF there. Remember the original so save() can put it back instead of
+        // silently rewriting every line of the file.
+        $crlf = substr_count($body, "\r\n");
+        $lfOnly = substr_count($body, "\n") - $crlf;
+        $eol = $crlf > $lfOnly ? 'crlf' : 'lf';
+
+        $utf8 = mb_check_encoding($body, 'UTF-8');
+        $name = (string) ($stat['name'] ?? PathGuard::basename($norm));
+        $protected = self::isForbiddenName($name);
+
+        $reason = null;
+        if ($protected) {
+            $reason = 'This file type is protected and cannot be edited here.';
+        } elseif (!$mount->canWrite) {
+            $reason = 'This drive is read-only for you.';
+        } elseif (!$utf8) {
+            $reason = 'This file is not valid UTF-8, so it is opened read-only.';
+        }
+
+        return [
+            'path' => $norm,
+            'name' => $name,
+            'size' => $size,
+            'mtime' => (int) ($stat['mtime'] ?? 0),
+            'content' => $body,
+            'eol' => $eol,
+            'bom' => $bom,
+            'encoding' => $utf8 ? 'utf-8' : 'non-utf8',
+            'hash' => hash('sha256', $raw),
+            'readOnly' => $reason !== null,
+            'readOnlyReason' => $reason,
+        ];
+    }
+
+    /**
+     * Overwrite an existing file with new text (the editor's Save).
+     *
+     * @param string|null $baseHash sha256 the editor loaded; when it no longer
+     *        matches the file on disk the write is refused so a concurrent edit
+     *        (another tab, another device, a background job) is never clobbered
+     * @return array<string,mixed>
+     */
+    public static function writeText(
+        AuthContext $user,
+        string $mountName,
+        string $path,
+        string $content,
+        ?string $baseHash = null
+    ): array {
+        [$mount, $adapter, $norm] = StorageManager::resolve($user, $mountName, $path);
+        self::assertWritable($mount, $adapter);
+
+        if ($norm === '/' || $adapter->isDir($norm)) {
+            throw new RuntimeException('Not a file', 400);
+        }
+        if (!$adapter->exists($norm)) {
+            throw new RuntimeException('File not found', 404);
+        }
+
+        $name = PathGuard::basename($norm);
+        // Same policy as upload / create-file: a write must never plant an
+        // executable type, even in a mount that happens to sit under a web root.
+        self::assertAllowedUpload($name);
+
+        $cap = self::editMaxBytes();
+        if (strlen($content) > $cap) {
+            throw new RuntimeException('Too large to save (' . self::humanBytes($cap) . ' limit)', 413);
+        }
+
+        if ($baseHash !== null && $baseHash !== '') {
+            $current = hash('sha256', self::readRaw($adapter, $norm, $cap));
+            if (!hash_equals($baseHash, $current)) {
+                throw new RuntimeException(
+                    'This file changed on disk since you opened it. Reload to see the current contents.',
+                    409
+                );
+            }
+        }
+
+        $fh = fopen('php://memory', 'r+b');
+        if ($fh === false) {
+            throw new RuntimeException('Internal error', 500);
+        }
+        try {
+            fwrite($fh, $content);
+            rewind($fh);
+            $written = $adapter->putStream($norm, $fh);
+        } finally {
+            fclose($fh);
+        }
+
+        $after = $adapter->stat($norm);
+        return [
+            'path' => $norm,
+            'name' => $name,
+            'size' => (int) ($after['size'] ?? $written),
+            'mtime' => (int) ($after['mtime'] ?? 0),
+            'written' => (int) $written,
+            // Hand back the new hash so a second Save needs no reload.
+            'hash' => hash('sha256', self::readRaw($adapter, $norm, $cap)),
+        ];
+    }
+
+    /** Editor size cap in bytes (shared by the read and write paths). */
+    private static function editMaxBytes(): int
+    {
+        return \App\Config\Config::i()->getInt('EDIT_MAX_BYTES', 5242880);
+    }
+
+    private static function humanBytes(int $n): string
+    {
+        if ($n >= 1048576) {
+            return rtrim(rtrim(number_format($n / 1048576, 1, '.', ''), '0'), '.') . ' MiB';
+        }
+        if ($n >= 1024) {
+            return round($n / 1024) . ' KiB';
+        }
+        return $n . ' B';
+    }
+
+    /** Bytes inspected to decide whether a file is text (see readText). */
+    private const SNIFF_BYTES = 8192;
+
+    /** Read at most $bytes from the start of a file. Never throws. */
+    private static function readHead(StorageAdapter $adapter, string $norm, int $bytes): string
+    {
+        try {
+            $fh = $adapter->getStream($norm);
+        } catch (Throwable) {
+            return '';
+        }
+        if (!is_resource($fh)) {
+            return '';
+        }
+        try {
+            // Bounded read: adapters only handle the range start, so the caller
+            // bounds the length (see LocalAdapter::getStream).
+            return (string) stream_get_contents($fh, $bytes);
+        } finally {
+            fclose($fh);
+        }
+    }
+
+    /** Read at most $cap bytes, refusing anything longer. @return string */
+    private static function readRaw(StorageAdapter $adapter, string $norm, int $cap): string
+    {
+        $fh = $adapter->getStream($norm);
+        if (!is_resource($fh)) {
+            throw new RuntimeException('Cannot read file', 500);
+        }
+        try {
+            $data = (string) stream_get_contents($fh, $cap + 1);
+        } finally {
+            fclose($fh);
+        }
+        if (strlen($data) > $cap) {
+            throw new RuntimeException('Too large to edit (' . self::humanBytes($cap) . ' limit)', 413);
+        }
+        return $data;
+    }
+
+    /** True when the upload policy forbids this name (never writable here). */
+    private static function isForbiddenName(string $name): bool
+    {
+        try {
+            self::assertAllowedUpload($name);
+            return false;
+        } catch (InvalidArgumentException) {
+            return true;
+        }
+    }
+
     public static function rename(AuthContext $user, string $mountName, string $path, string $newName): array
     {
         [$mount, $adapter, $norm] = StorageManager::resolve($user, $mountName, $path);

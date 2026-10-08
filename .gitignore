@@ -7,11 +7,40 @@
 data/
 storage-root/
 
+# --- generated server state that must NEVER be committed -------------------
+# docker-compose.yml falls back to paths INSIDE the repo when the matching env
+# var is unset:  ${CERTS_HOST_PATH:-./certs}
+#                ${ACME_WEBROOT_HOST_PATH:-./acme-webroot}
+#                ${BACKUP_HOST_PATH:-./backups}
+# So a deployment that forgets to set them writes these here. certs/ holds the
+# TLS PRIVATE KEY, and backups/ holds the SQLite database plus the encryption
+# keys (file.key / app.key) — committing either is unrecoverable, because those
+# keys are what decrypt everything else. In .env these point outside the repo;
+# these rules cover the fallback and a stray `openssl`/`ansnew:backup` run.
+certs/
+acme-webroot/
+backups/
+
+# TLS material, wherever it is written. Nothing tracked matches these today.
+*.pem
+*.crt
+*.key
+
 # Local databases / logs
 *.sqlite
 *.sqlite-journal
 *.log
 build.log
+
+# Scratch dirs written by the test tools while they run (removed on success, left
+# behind after a crash). See tools/editor-smoke.mjs, tools/editor-text-policy-test.sh.
+.scratch-*/
+
+# Stray Windows-path artifacts (a bad shell expansion once created "bin;C/")
+# and locally-taken backup tarballs.
+*;*
+*.tar.gz
+storage-backup-*
 
 # --- dependencies (generated) -------------------------------------------
 vendor/

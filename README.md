@@ -51,6 +51,37 @@ Credentials are also written to `/root/ANSNEW-CREDENTIALS.txt` (mode 600).
 
 ---
 
+## Production deployment (public server + real domain)
+
+For an internet-facing install — real TLS, HSTS, secure cookies, a firewall,
+database/key backups and an upgrade runbook — follow
+**[docs/DEPLOY.md](docs/DEPLOY.md)**. Backups (including the encryption keys) are
+covered in **[docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)**.
+
+The short version:
+
+```bash
+sudo ./install.sh --domain cloud.example.com          # writes a hardened .env
+./scripts/init-letsencrypt.sh cloud.example.com you@example.com
+```
+
+Then add nightly backups and certificate renewal:
+
+```bash
+./scripts/backup.sh
+# 0 3 * * * /srv/ansnew-cloud/scripts/backup.sh    >> /var/log/ansnew-backup.log 2>&1
+# 0 3 * * * /srv/ansnew-cloud/scripts/renew-cert.sh >> /var/log/ansnew-cert.log 2>&1
+```
+
+> **Keep the `nas` (SMB, port 445) and `mysql` profiles OFF on a public host** —
+> they are for a trusted LAN or development only.
+>
+> **Never run `docker compose down -v`.** It deletes the `data_volume`, which
+> holds the database *and* the master encryption keys; every encrypted file in
+> `storage-root/` would then be unreadable forever.
+
+---
+
 ## First login
 
 **Username:** `ADMIN_USER` from your `.env` (default `admin`).

@@ -181,16 +181,53 @@ final class Request
         return $out;
     }
 
+    /**
+     * Client IP used for rate limiting, login lockout and the audit log.
+     *
+     * X-Forwarded-For is honoured ONLY when the operator opted in
+     * (TRUST_PROXY=true) AND the immediate peer is a private/loopback address —
+     * i.e. a proxy we control really is in front. Otherwise the header is just
+     * client-supplied text, and trusting it lets anyone forge the IP that
+     * lockouts and rate limits key on.
+     *
+     * The LAST hop is taken, not the first: our edge overwrites the header, so
+     * the last entry is the address it actually observed, while a
+     * client-injected prefix is ignored.
+     */
     public function ip(): string
     {
+        $remote = (string) ($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');
+
+        if (!\App\Config\Config::i()->getBool('TRUST_PROXY', false) || !self::isProxyPeer($remote)) {
+            return $remote;
+        }
+
         $xff = $this->header('x-forwarded-for');
         if ($xff !== null && $xff !== '') {
-            $first = trim(explode(',', $xff)[0]);
-            if (filter_var($first, FILTER_VALIDATE_IP) !== false) {
-                return $first;
+            $parts = array_values(array_filter(
+                array_map('trim', explode(',', $xff)),
+                static fn (string $p): bool => $p !== ''
+            ));
+            for ($i = count($parts) - 1; $i >= 0; $i--) {
+                if (filter_var($parts[$i], FILTER_VALIDATE_IP) !== false) {
+                    return $parts[$i];
+                }
             }
         }
-        return (string) ($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');
+
+        // Some proxies only set X-Real-IP.
+        $real = $this->header('x-real-ip');
+        if ($real !== null && filter_var(trim($real), FILTER_VALIDATE_IP) !== false) {
+            return trim($real);
+        }
+
+        return $remote;
+    }
+
+    /** True when the peer is loopback/private/reserved — i.e. a proxy we control. */
+    private static function isProxyPeer(string $ip): bool
+    {
+        return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
     }
 
     public function userAgent(): string

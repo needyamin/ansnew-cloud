@@ -49,6 +49,7 @@ DEFAULT_DIR="/opt/ansnew-cloud"
 HTTP_PORT=""; APP_DIR=""; STORAGE_DIR=""
 ADMIN_USER="admin"; ADMIN_PASSWORD=""; APP_URL=""; ADMIN_EMAIL="admin@example.com"
 ENABLE_NAS=0; USE_MYSQL=0; CN=0; NO_START=0; FORCE_ENV=0
+DOMAIN=""; USE_TLS=0; HTTPS_PORT=""
 
 # --- output helpers ----------------------------------------------------------
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -71,14 +72,21 @@ ANSNEW CLOUD — one-shot installer for a fresh Ubuntu / Debian server
   sudo ./install.sh                 # from an existing checkout
 
 Options
-  --port 8081              host HTTP port (default 8080, auto-bumped if busy)
+  --domain cloud.example.com  PUBLIC deployment: sets APP_URL=https://<domain>,
+                          ports 80/443, SESSION_SECURE_COOKIE=true, TRUST_PROXY=true
+                          and opens 80/443 in ufw. See docs/DEPLOY.md
+  --tls                   after installing, also obtain a Let's Encrypt cert
+                          (scripts/init-letsencrypt.sh); implies --domain
+  --port 8081              host HTTP port (default 8080, auto-bumped if busy;
+                          forced to 80 when --domain is used)
   --dir /opt/ansnew-cloud  install directory (default: this checkout)
   --storage /srv/ansnew    host dir for the default local mount
   --admin-user admin       bootstrap admin username
   --admin-password 'x'     bootstrap admin password (prompted, or random if non-interactive)
   --admin-email a@b.c      bootstrap admin email
   --app-url http://a.b:8080  canonical URL (default: http://<host-ip>:<port>)
-  --nas                    also enable the optional SMB / NAS profile (TCP 445)
+  --nas                    also enable the optional SMB / NAS profile (TCP 445).
+                          Do NOT use on a public host.
   --mysql                  use MariaDB instead of the default SQLite
   --cn                     prefer Chinese mirrors for apt / Docker
   --force-env              rewrite an existing .env (old one is backed up)
@@ -86,6 +94,9 @@ Options
   -h, --help
 
 Re-running is safe: an existing .env is kept unless --force-env is given.
+
+Going on the public internet? Read docs/DEPLOY.md first — it covers DNS,
+firewall, real TLS + renewal, backups and the upgrade runbook.
 USAGE
     exit 0
 }
@@ -99,6 +110,8 @@ while [[ $# -gt 0 ]]; do
         --admin-password) ADMIN_PASSWORD="${2:?--admin-password needs a value}"; shift 2 ;;
         --admin-email)    ADMIN_EMAIL="${2:?--admin-email needs a value}"; shift 2 ;;
         --app-url)        APP_URL="${2:?--app-url needs a value}"; shift 2 ;;
+        --domain)         DOMAIN="${2:?--domain needs a value}"; shift 2 ;;
+        --tls)            USE_TLS=1; shift ;;
         --nas)            ENABLE_NAS=1; shift ;;
         --mysql)          USE_MYSQL=1; shift ;;
         --cn)             CN=1; shift ;;
@@ -108,6 +121,8 @@ while [[ $# -gt 0 ]]; do
         *)                die "unknown option: $1 (try --help)" ;;
     esac
 done
+
+[[ $USE_TLS -eq 1 && -z $DOMAIN ]] && die "--tls requires --domain <your.domain>"
 
 # --- root --------------------------------------------------------------------
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -302,7 +317,9 @@ setup_env() {
         cp "$APP_DIR/.env.example" "$envf"
     fi
 
-    # --- port -----------------------------------------------------------------
+    # --- ports ----------------------------------------------------------------
+    # HTTP_PORT is the APP listener (kept private in production). The public
+    # ports are PUBLIC_HTTP_PORT (ACME + redirect to HTTPS) and HTTPS_PORT.
     HTTP_PORT="${HTTP_PORT:-$(grep -sE '^HTTP_PORT=' "$envf" | cut -d= -f2-)}"
     HTTP_PORT="${HTTP_PORT:-8080}"
     local tries=0
@@ -312,7 +329,24 @@ setup_env() {
         (( tries > 20 )) && die "no free port found near the requested one"
     done
 
+    if [[ -n $DOMAIN ]]; then
+        # A public domain needs 80/443 specifically (ACME + redirect), so those
+        # are never auto-bumped.
+        PUBLIC_HTTP_PORT="${PUBLIC_HTTP_PORT:-80}"
+        HTTPS_PORT="${HTTPS_PORT:-443}"
+        port_in_use "$PUBLIC_HTTP_PORT" && warn "port ${PUBLIC_HTTP_PORT} is busy — stop the other web server before issuing the certificate"
+    else
+        # LAN install: the redirect listener is unused, so keep it out of the way.
+        PUBLIC_HTTP_PORT="${PUBLIC_HTTP_PORT:-9080}"
+        HTTPS_PORT="${HTTPS_PORT:-9443}"
+    fi
+
     # --- URL / admin ----------------------------------------------------------
+    if [[ -n $DOMAIN ]]; then
+        # Accept "example.com", "https://example.com/" — store the bare host.
+        DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%/}"
+        [[ -z $APP_URL ]] && APP_URL="https://${DOMAIN}"
+    fi
     if [[ -z $APP_URL ]]; then
         APP_URL="http://$(detect_ip):${HTTP_PORT}"
     fi
@@ -340,11 +374,20 @@ setup_env() {
     (( ${#ADMIN_PASSWORD} < min_len )) && { min_len=${#ADMIN_PASSWORD}; warn "password is shorter than 10 characters"; }
 
     set_env HTTP_PORT            "$HTTP_PORT"            "$envf"
+    set_env PUBLIC_HTTP_PORT     "$PUBLIC_HTTP_PORT"     "$envf"
+    set_env HTTPS_PORT           "$HTTPS_PORT"           "$envf"
     set_env APP_URL              "$APP_URL"              "$envf"
     set_env ADMIN_USER           "$ADMIN_USER"           "$envf"
     set_env ADMIN_EMAIL          "$ADMIN_EMAIL"          "$envf"
     set_env ADMIN_PASSWORD       "\"${ADMIN_PASSWORD}\"" "$envf"
     set_env PASSWORD_MIN_LENGTH  "$min_len"              "$envf"
+    # Over HTTPS the session cookie must be Secure — and PHP may trust the
+    # proxy's X-Forwarded-For for the real client IP. Over plain HTTP neither
+    # applies (a Secure cookie would simply never be sent).
+    if [[ -n $DOMAIN || $APP_URL == https://* ]]; then
+        set_env SESSION_SECURE_COOKIE true "$envf"
+        set_env TRUST_PROXY true "$envf"
+    fi
 
     # --- storage --------------------------------------------------------------
     STORAGE_DIR="${STORAGE_DIR:-$APP_DIR/storage-root}"
@@ -454,7 +497,14 @@ finish() {
     if command -v ufw >/dev/null 2>&1; then
         local fwstate; fwstate="$(ufw status 2>/dev/null || true)"
         if [[ $fwstate == *"Status: active"* ]]; then
-            ufw allow "${HTTP_PORT}/tcp" >/dev/null 2>&1 && ok "ufw: allowed ${HTTP_PORT}/tcp"
+            if [[ -n $DOMAIN ]]; then
+                # Public deployment: open ONLY the public ports. The app listener
+                # (HTTP_PORT) stays closed to the outside world.
+                ufw allow "${PUBLIC_HTTP_PORT}/tcp" >/dev/null 2>&1 && ok "ufw: allowed ${PUBLIC_HTTP_PORT}/tcp"
+                ufw allow "${HTTPS_PORT}/tcp" >/dev/null 2>&1 && ok "ufw: allowed ${HTTPS_PORT}/tcp"
+            else
+                ufw allow "${HTTP_PORT}/tcp" >/dev/null 2>&1 && ok "ufw: allowed ${HTTP_PORT}/tcp"
+            fi
         fi
     fi
     local cred="/root/ANSNEW-CREDENTIALS.txt"
@@ -467,6 +517,20 @@ finish() {
         printf '  storage  : %s\n' "$STORAGE_DIR"
     } > "$cred"
     chmod 600 "$cred"
+
+    # --- TLS (opt-in) ---------------------------------------------------------
+    if [[ $USE_TLS -eq 1 && -n $DOMAIN ]]; then
+        step "Obtaining a Let's Encrypt certificate for ${DOMAIN}"
+        if "$APP_DIR/scripts/init-letsencrypt.sh" "$DOMAIN" "$ADMIN_EMAIL"; then
+            ok "TLS certificate installed"
+        else
+            warn "certificate step failed — run it manually once DNS/ports are ready:"
+            warn "  $APP_DIR/scripts/init-letsencrypt.sh $DOMAIN $ADMIN_EMAIL"
+        fi
+    elif [[ -n $DOMAIN ]]; then
+        warn "self-signed certificate in use — run this once DNS points here:"
+        warn "  $APP_DIR/scripts/init-letsencrypt.sh $DOMAIN $ADMIN_EMAIL"
+    fi
     ok "credentials also saved to $cred (mode 600)"
 }
 

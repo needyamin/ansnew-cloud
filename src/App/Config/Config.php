@@ -57,6 +57,16 @@ final class Config
             'RATE_LIMIT_WINDOW', 'LOGIN_MAX_ATTEMPTS', 'LOGIN_LOCKOUT_BASE',
             'LOGIN_LOCKOUT_MAX', 'TRASH_ENABLED', 'TRASH_RETENTION_DAYS',
             'SSRF_ALLOW_PRIVATE', 'SSRF_ALLOWLIST', 'WS_INTERNAL_URL', 'SESSION_SECURE_COOKIE',
+            // Asset rate-limit bucket, sensitive-action TTL and NAS ingest cap.
+            // These were read by code but missing here, so the env value was
+            // silently ignored and the hardcoded default always won.
+            'RATE_LIMIT_ASSET_REQUESTS', 'SENSITIVE_GRANT_TTL', 'NAS_INGEST_MBPS',
+            // Job queue recovery + trusted-proxy handling (see JobService, Request).
+            'JOB_LEASE_SECONDS', 'JOB_MAX_ATTEMPTS', 'TRUST_PROXY',
+            // How long to coalesce usage re-scans after a mutation (UsageService).
+            'USAGE_RESCAN_DEBOUNCE',
+            // Largest file the built-in text/code editor will open or save.
+            'EDIT_MAX_BYTES',
             // Bootstrap admin (first boot only — see bin/console.php ansnew:bootstrap-admin).
             'ADMIN_USER', 'ADMIN_PASSWORD', 'ADMIN_EMAIL',
             // Master keys / shared secret.
@@ -64,6 +74,8 @@ final class Config
             // Storage + encryption behaviour.
             'DEFAULT_MOUNT_PATH', 'DEFAULT_MOUNT_LABEL', 'ANSNEW_ENCRYPT_LOCAL',
             'ANSNEW_DATA_DIR', 'ANSNEW_STORAGE_ROOT', 'PASSWORD_MIN_LENGTH',
+            // Drive health / backup behaviour.
+            'ANSNEW_SMART_ENABLED', 'ANSNEW_BACKUP_DIR',
         ] as $key) {
             $val = getenv($key);
             if ($val !== false) {
@@ -105,6 +117,20 @@ final class Config
     public function storageRoot(): string
     {
         return getenv('ANSNEW_STORAGE_ROOT') ?: '/srv/storage';
+    }
+
+    /**
+     * Where backup manifests live. The manifest is metadata (path, size, mtime)
+     * — the copied data itself always lands on a drive the user chose.
+     */
+    public function backupsDir(): string
+    {
+        $dir = $this->get('ANSNEW_BACKUP_DIR');
+        $dir = $dir !== '' ? $dir : $this->dataDir() . '/backups';
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0770, true);
+        }
+        return $dir;
     }
 
     /**

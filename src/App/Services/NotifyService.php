@@ -87,6 +87,13 @@ final class NotifyService
         if ($dirsByMount === []) {
             return;
         }
+        // Every caller of fsChanged is a mutation, so this is the one place that
+        // keeps the sidebar's cached size figures honest. (The `du` job itself
+        // never reaches here — JobService::notifyFsChange ignores that type —
+        // so a re-scan cannot invalidate its own result.)
+        foreach (array_keys($dirsByMount) as $mount) {
+            UsageService::invalidate((string) $mount, $userId);
+        }
         self::push([$userId], 'fs.changed', [
             'mounts' => $dirsByMount,
             'reason' => $reason,

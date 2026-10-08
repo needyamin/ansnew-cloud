@@ -45,6 +45,18 @@ switch ($cmd) {
         encryptExisting($argv);
         break;
 
+    case 'ansnew:backup':
+        backup($argv);
+        break;
+
+    case 'ansnew:db-check':
+        dbCheck();
+        break;
+
+    case 'ansnew:restore':
+        restore($argv);
+        break;
+
     default:
         fwrite(STDERR, "Usage: php bin/console.php <command>\n");
         fwrite(STDERR, "  ansnew:migrate\n");
@@ -53,7 +65,187 @@ switch ($cmd) {
         fwrite(STDERR, "  ansnew:reset-password [--user=NAME] [--password=VALUE] [--random]\n");
         fwrite(STDERR, "  ansnew:crypto-status [--scan]\n");
         fwrite(STDERR, "  ansnew:encrypt-existing [--mount=NAME] [--dry-run] [--limit=N]\n");
+        fwrite(STDERR, "  ansnew:backup [--out=DIR] [--no-config]\n");
+        fwrite(STDERR, "  ansnew:db-check\n");
+        fwrite(STDERR, "  ansnew:restore --from=DIR --yes\n");
         exit(1);
+}
+
+/**
+ * Snapshot everything needed to rebuild this instance: the SQLite database, the
+ * master keys, and (optionally) .env.
+ *
+ * The UI's "Backup" feature copies drive CONTENTS; it never captured the
+ * database or the encryption keys. So losing the data volume meant losing every
+ * user, share and setting — and losing file.key meant every encrypted file
+ * became permanently unreadable. This is the missing half. See
+ * docs/BACKUP-RESTORE.md.
+ */
+function backup(array $argv): void
+{
+    $out = Config::i()->get('ANSNEW_BACKUP_DIR', '/var/www/data/backups');
+    $includeEnv = true;
+    foreach ($argv as $a) {
+        if (str_starts_with($a, '--out=')) {
+            $out = substr($a, 6);
+        } elseif ($a === '--no-config') {
+            $includeEnv = false;
+        }
+    }
+
+    $dir = rtrim($out, '/') . '/ansnew-backup-' . gmdate('Ymd-His');
+    if (!is_dir($dir) && !@mkdir($dir, 0700, true)) {
+        fwrite(STDERR, "[ansnew] cannot create {$dir}\n");
+        exit(1);
+    }
+    @chmod($dir, 0700);
+
+    $db = Database::i();
+    $driver = Config::i()->get('DB_DRIVER', 'sqlite');
+    $dbFile = $dir . '/ansnew.sqlite';
+
+    if ($driver === 'sqlite') {
+        // VACUUM INTO is WAL-safe and needs no downtime; it also compacts.
+        // The path is operator-supplied, so escape it rather than interpolating.
+        try {
+            $db->run("VACUUM INTO '" . str_replace("'", "''", $dbFile) . "'");
+        } catch (\Throwable $e) {
+            fwrite(STDERR, '[ansnew] VACUUM INTO failed (' . $e->getMessage() . "), falling back to a copy\n");
+            $live = (string) Config::i()->get('DB_DATABASE', Config::i()->dataDir() . '/ansnew.sqlite');
+            if (!@copy($live, $dbFile)) {
+                fwrite(STDERR, "[ansnew] cannot copy the database\n");
+                exit(1);
+            }
+        }
+        // Never report success on a snapshot that is not readable.
+        try {
+            $check = new PDO('sqlite:' . $dbFile);
+            $res = $check->query('PRAGMA integrity_check')->fetchColumn();
+        } catch (\Throwable $e) {
+            $res = 'error: ' . $e->getMessage();
+        }
+        if ($res !== 'ok') {
+            fwrite(STDERR, "[ansnew] snapshot failed integrity_check: {$res}\n");
+            exit(1);
+        }
+    } else {
+        fwrite(STDERR, "[ansnew] DB_DRIVER={$driver}: dump it with mysqldump (see docs/BACKUP-RESTORE.md)\n");
+    }
+
+    // Master keys — losing file.key makes every encrypted local file unreadable.
+    $keysOut = $dir . '/keys';
+    @mkdir($keysOut, 0700, true);
+    $keyCount = 0;
+    foreach (glob(Config::i()->dataDir() . '/keys/*') ?: [] as $k) {
+        if (is_file($k) && @copy($k, $keysOut . '/' . basename($k))) {
+            @chmod($keysOut . '/' . basename($k), 0600);
+            $keyCount++;
+        }
+    }
+
+    // .env holds the deployment's secrets, so it is included but locked down.
+    $envNote = 'excluded';
+    if ($includeEnv) {
+        $env = dirname(__DIR__) . '/.env';
+        if (is_file($env) && @copy($env, $dir . '/env.txt')) {
+            @chmod($dir . '/env.txt', 0600);
+            $envNote = 'included (env.txt)';
+        }
+    }
+
+    file_put_contents($dir . '/MANIFEST.txt', implode("\n", [
+        'ANSNEW CLOUD backup',
+        'created: ' . gmdate('c'),
+        'database: ' . ($driver === 'sqlite' && is_file($dbFile)
+            ? 'ansnew.sqlite (' . filesize($dbFile) . ' bytes)'
+            : $driver . ' (dump separately)'),
+        'keys: ' . $keyCount . ' file(s)',
+        'config: ' . $envNote,
+        '',
+        'Restore: docs/BACKUP-RESTORE.md',
+    ]) . "\n");
+
+    echo "[ansnew] backup written to {$dir}\n";
+    echo '  keys: ' . $keyCount . "\n";
+    echo "  WARNING: this contains your master keys and .env — store it encrypted, off-box.\n";
+}
+
+function dbCheck(): void
+{
+    $driver = Config::i()->get('DB_DRIVER', 'sqlite');
+    if ($driver !== 'sqlite') {
+        echo "[ansnew] DB_DRIVER={$driver}: integrity_check is SQLite-only\n";
+        return;
+    }
+    $res = Database::i()->scalar('PRAGMA integrity_check');
+    echo "[ansnew] integrity_check: {$res}\n";
+    if ($res !== 'ok') {
+        exit(1);
+    }
+}
+
+/**
+ * Restore a database + key snapshot produced by `ansnew:backup`.
+ *
+ * Destructive and irreversible, so it demands --yes and refuses to run while a
+ * job is in flight (the worker would be writing to the file being replaced).
+ */
+function restore(array $argv): void
+{
+    $from = '';
+    $yes = false;
+    foreach ($argv as $a) {
+        if (str_starts_with($a, '--from=')) {
+            $from = rtrim(substr($a, 7), '/');
+        } elseif ($a === '--yes') {
+            $yes = true;
+        }
+    }
+    if ($from === '' || !is_dir($from)) {
+        fwrite(STDERR, "Usage: ansnew:restore --from=<backup dir> --yes\n");
+        exit(1);
+    }
+    if (!$yes) {
+        fwrite(STDERR, "[ansnew] refusing to overwrite the live database without --yes\n");
+        exit(1);
+    }
+
+    $dbFile = $from . '/ansnew.sqlite';
+    if (!is_file($dbFile)) {
+        fwrite(STDERR, "[ansnew] no ansnew.sqlite in {$from}\n");
+        exit(1);
+    }
+
+    $running = (int) Database::i()->scalar("SELECT COUNT(*) FROM jobs WHERE status = 'running'");
+    if ($running > 0) {
+        fwrite(STDERR, "[ansnew] {$running} job(s) still running — stop the worker first\n");
+        exit(1);
+    }
+
+    $target = (string) Config::i()->get('DB_DATABASE', Config::i()->dataDir() . '/ansnew.sqlite');
+    if (!@copy($dbFile, $target)) {
+        fwrite(STDERR, "[ansnew] cannot write {$target}\n");
+        exit(1);
+    }
+    // Drop stale WAL/SHM so the restored file is authoritative.
+    @unlink($target . '-wal');
+    @unlink($target . '-shm');
+    echo "[ansnew] database restored from {$dbFile}\n";
+
+    $keysFrom = $from . '/keys';
+    if (is_dir($keysFrom)) {
+        $keysTo = Config::i()->dataDir() . '/keys';
+        @mkdir($keysTo, 0770, true);
+        $n = 0;
+        foreach (glob($keysFrom . '/*') ?: [] as $k) {
+            if (is_file($k) && @copy($k, $keysTo . '/' . basename($k))) {
+                $n++;
+            }
+        }
+        echo "[ansnew] {$n} master key(s) restored\n";
+    }
+
+    echo "[ansnew] now restart the stack: docker compose restart php worker\n";
 }
 
 /**

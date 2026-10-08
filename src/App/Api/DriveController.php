@@ -8,8 +8,11 @@ use App\Auth\Guard;
 use App\Auth\SessionManager;
 use App\Core\Request;
 use App\Core\Response;
+use App\Services\DriveHealthService;
 use App\Services\DriveService;
 use App\Services\NotifyService;
+use App\Storage\StorageManager;
+use RuntimeException;
 
 /**
  * User-facing drive management: list, create, rename, disconnect.
@@ -24,6 +27,33 @@ final class DriveController
     {
         $user = Guard::requireUser($session);
         return Response::ok(['drives' => DriveService::listFor($user)]);
+    }
+
+    /**
+     * GET /api/drives/info — the "This PC" payload.
+     *
+     * Capacity, drive type and disk health for every drive this account can
+     * see. Anything the platform cannot actually measure comes back null (with
+     * a reason) rather than a made-up number.
+     */
+    public static function info(Request $req, SessionManager $session): Response
+    {
+        $user = Guard::requireUser($session);
+        $refresh = \App\Support\Validator::bool($req->query('refresh', false));
+        return Response::ok(['drives' => DriveHealthService::forUser($user, $refresh)]);
+    }
+
+    /** GET /api/drives/{name}/health — one drive, optionally re-probed. */
+    public static function health(Request $req, SessionManager $session, string $name): Response
+    {
+        $user = Guard::requireUser($session);
+        try {
+            $mount = StorageManager::mountFor($user, $name);
+        } catch (RuntimeException $e) {
+            return Response::error('Drive not found', 404, 'not_found');
+        }
+        $refresh = \App\Support\Validator::bool($req->query('refresh', false));
+        return Response::ok(['drive' => DriveHealthService::forMount($user, $mount, null, $refresh)]);
     }
 
     /** Adapter types the caller is allowed to create. */

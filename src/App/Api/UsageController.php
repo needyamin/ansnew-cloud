@@ -8,7 +8,6 @@ use App\Auth\Guard;
 use App\Auth\SessionManager;
 use App\Core\Request;
 use App\Core\Response;
-use App\Services\JobService;
 use App\Services\UsageService;
 
 final class UsageController
@@ -25,7 +24,9 @@ final class UsageController
     public static function scan(Request $req, SessionManager $session, string $mount): Response
     {
         $user = Guard::requireUser($session);
-        $jobId = JobService::enqueue($user->id, 'du', ['mount' => $mount, 'userId' => $user->id]);
-        return Response::ok(['job' => $jobId]);
+        // Explicitly requested, so bypass the debounce — but still dedupe
+        // against a scan that is already queued or running for this mount.
+        $jobId = UsageService::requestRescan($mount, $user->id, true);
+        return Response::ok(['job' => $jobId, 'queued' => $jobId !== null]);
     }
 }

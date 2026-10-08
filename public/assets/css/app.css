@@ -93,7 +93,7 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
   .sidebar.collapsed .side-sec { display: none; }
   .sidebar.collapsed .side-item { justify-content: center; padding: 9px 0; }
   .sidebar.collapsed .side-item .lbl,
-  .sidebar.collapsed .side-item .usage-bar { display: none; }
+  .sidebar.collapsed .side-item .usage { display: none; }
 }
 /* Backdrop for the overlay drawer (<=900px only; never rendered on desktop). */
 .scrim { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 940; }
@@ -110,6 +110,15 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .side-item.active { background: var(--sel); color: var(--text); }
 .side-item .ico { width: 16px; height: 16px; flex-shrink: 0; }
 .side-item .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Drive rows carry the used/total size under the name, so the label column
+   stacks: name on top, usage line beneath. */
+.side-item .side-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.side-item .side-meta .lbl { flex: none; width: 100%; }
+.side-item .usage { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.side-item .usage-txt {
+  font-size: 11px; line-height: 1.2; color: var(--text3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 /* Section header that carries a trailing action (e.g. Recent → "All"). */
 .side-sec-row { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
 .link-btn { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
@@ -131,8 +140,12 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .table td .link-btn svg.icon { width: 15px; height: 15px; color: var(--text2); }
 .table td .link-btn:hover svg.icon { color: var(--accent); }
 
-.side-item .usage-bar { height: 4px; background: var(--bg3); border-radius: 2px; margin-top: 3px; overflow: hidden; }
+.side-item .usage-bar { flex: 1 1 30px; height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
 .side-item .usage-bar > i { display: block; height: 100%; background: var(--accent); }
+/* Figure is being recomputed after a change to the mount: keep it visible but
+   make clear it is not final yet. */
+.side-item .usage.stale { opacity: .55; }
+.side-item .usage.stale .usage-bar > i { background: var(--text3); }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .topbar {
   height: 46px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 0 12px;
@@ -171,8 +184,14 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .filelist { flex: 1; overflow: auto; outline: none; position: relative; }
 /* Both modes are block-level: rows/tiles are absolutely positioned inside
    .fl-spacer by FilesPane, which is how the list stays windowed. */
-.filelist.grid { display: block; padding: 8px; }
-.filelist.list { padding: 4px 6px; }
+.filelist.grid, .filelist.icons { display: block; padding: 8px; }
+/* Explorer's "List": small icon + name, flowing into columns. */
+.filelist.list {
+  display: block; padding: 6px;
+  --tile-h: 30px; --tile-min: 190px; --tile-gap: 2px;
+}
+/* Explorer's "Details": the row/table view. */
+.filelist.details { padding: 4px 6px; }
 /* The virtual canvas: its height stands in for the whole listing. */
 .fl-spacer { position: relative; width: 100%; }
 
@@ -242,6 +261,19 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .frow.dragging, .fitem.dragging { opacity: .45; }
 /* While a drag is in flight, make folders obviously droppable. */
 .pane.is-dragging .frow[data-path][data-dir="1"] { outline: 1px dashed var(--border2); outline-offset: -2px; }
+
+/* ---------- rubber-band selection ---------- */
+/* Lives inside .fl-spacer, so it shares the rows' coordinate space and scrolls
+   with the content. pointer-events:none keeps it from swallowing the drag. */
+.marquee {
+  position: absolute; top: 0; left: 0; z-index: 5; pointer-events: none;
+  border: 1px solid var(--accent);
+  background: var(--sel);
+  border-radius: 2px;
+}
+.marquee[hidden] { display: none; }
+/* Suppress the browser's own text/image selection for the duration of the drag. */
+.filelist.marquee-active, .filelist.marquee-active * { user-select: none; }
 
 /* ---------- selection action bar ---------- */
 .selbar {
@@ -335,13 +367,13 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 /* The skeleton is transient, so it is NOT virtualized: it flows normally
    inside the scroll container while the spacer stays collapsed. */
 .skeleton-wrap { display: block; }
-.filelist.grid .skeleton-wrap { display: flex; flex-wrap: wrap; gap: var(--tile-gap); }
+.filelist.grid .skeleton-wrap, .filelist.icons .skeleton-wrap { display: flex; flex-wrap: wrap; gap: var(--tile-gap); }
 .skeleton { pointer-events: none; }
 .skeleton .sk-ico { width: 18px; height: 18px; border-radius: 4px; background: var(--bg3); flex-shrink: 0; }
 .skeleton .sk-line { height: 10px; border-radius: 5px; background: var(--bg3); flex: 1; }
-.filelist.grid .skeleton { flex: 0 0 var(--tile-min); flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; }
-.filelist.grid .skeleton .sk-ico { width: 42px; height: 42px; border-radius: 8px; }
-.filelist.grid .skeleton .sk-line { width: 70%; flex: none; }
+.filelist.grid .skeleton, .filelist.icons .skeleton { flex: 0 0 var(--tile-min); flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; }
+.filelist.grid .skeleton .sk-ico, .filelist.icons .skeleton .sk-ico { width: 42px; height: 42px; border-radius: 8px; }
+.filelist.grid .skeleton .sk-line, .filelist.icons .skeleton .sk-line { width: 70%; flex: none; }
 .skeleton .sk-ico, .skeleton .sk-line {
   background-image: linear-gradient(90deg, var(--bg3) 0%, var(--border) 50%, var(--bg3) 100%);
   background-size: 200% 100%;
@@ -397,6 +429,93 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .preview-body .md { background: var(--panel); padding: 20px 26px; border-radius: 8px; max-width: 860px; width: 100%; overflow-wrap: anywhere; }
 .preview-body .md h1, .preview-body .md h2, .preview-body .md h3 { margin: .6em 0 .3em; }
 .preview-body object { width: 100%; height: 100%; }
+
+/* ---------- built-in code editor (text files) ---------- */
+/* Fills the viewport: this is a workspace, not a modal, and it must not be
+   dismissible by clicking outside (that would lose unsaved edits). */
+.editor-overlay { position: fixed; inset: 0; z-index: 960; background: var(--bg); display: flex; flex-direction: column; }
+.editor-bar {
+  display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); min-width: 0;
+}
+.editor-bar svg.icon { width: 18px; height: 18px; color: var(--accent); }
+.editor-bar .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.editor-bar .path { font-size: 12.5px; max-width: 38%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-dirty { color: var(--warn); font-size: 12px; opacity: 0; transition: opacity .12s; }
+.editor-dirty.show { opacity: 1; }
+/* A dirty buffer glows the Save button, so "there are unsaved changes" is
+   visible without hunting for the dot. */
+.btn.primary.armed { box-shadow: 0 0 0 2px var(--warn); }
+.btn.active { border-color: var(--accent); color: var(--accent); }
+.editor-tools {
+  display: flex; align-items: center; gap: 10px; padding: 6px 14px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); font-size: 12.5px;
+}
+.editor-badge { color: var(--warn); border: 1px solid var(--border2); border-radius: 999px; padding: 2px 10px; }
+.editor-main { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+/* Gutter and textarea must share font-size, line-height and top padding or the
+   numbers drift out of step with the lines. */
+.editor-gutter {
+  flex: 0 0 auto; overflow: hidden; padding: 12px 8px 12px 12px; text-align: right;
+  white-space: pre; user-select: none;
+  background: var(--bg2); border-right: 1px solid var(--border); color: var(--text3);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 13px; line-height: 1.55;
+}
+.editor-gutter.hidden { display: none; }
+.editor-text {
+  flex: 1; min-width: 0; margin: 0; border: 0; border-radius: 0; outline: none; resize: none;
+  padding: 12px; background: var(--bg); color: var(--text);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 13px; line-height: 1.55; tab-size: 2; white-space: pre; overflow: auto;
+}
+.editor-text:focus { border: 0; }
+.editor-text.wrap { white-space: pre-wrap; word-break: break-word; }
+.editor-text.readonly { color: var(--text2); }
+.editor-preview { flex: 1; overflow: auto; padding: 22px 28px; max-width: 900px; width: 100%; }
+.editor-status {
+  display: flex; align-items: center; gap: 14px; padding: 5px 14px;
+  background: var(--bg2); border-top: 1px solid var(--border); font-size: 12px; color: var(--text2);
+}
+.editor-status .sp { flex: 1; }
+.editor-notice { flex: 1; display: grid; place-items: center; padding: 24px; text-align: center; }
+/* Narrow screens: shed the editor's chrome before the toolbar wraps (the
+   actions keep their icons and their tooltips). */
+@media (max-width: 900px) {
+  .editor-bar .path { display: none; }
+  .editor-bar .btn .lbl { display: none; }
+}
+
+/* ---------- media player (video/audio) ---------- */
+.mp { position: relative; width: 100%; max-width: 1080px; background: #000; border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); }
+.mp-stage { position: relative; display: flex; align-items: center; justify-content: center; background: #000; }
+.mp-media { display: block; width: 100%; max-height: 76vh; background: #000; }
+.mp-audio .mp-stage { min-height: 240px; background: radial-gradient(120% 130% at 50% 0%, #232b3a 0%, #0c0f14 72%); }
+/* Keep the audio element in the layout (display:none can pause it in some
+   browsers) but visually collapse it behind the artwork. */
+.mp-audio .mp-media { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.mp-audio-art { position: absolute; inset: 0; display: grid; place-items: center; color: var(--accent); opacity: .3; }
+.mp-spinner { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.mp-ring { width: 42px; height: 42px; border-radius: 50%; border: 3px solid rgba(255,255,255,.25); border-top-color: var(--accent); animation: mp-spin .8s linear infinite; }
+@keyframes mp-spin { to { transform: rotate(360deg); } }
+.mp-bigplay { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 76px; height: 76px; border-radius: 50%; border: none; background: rgba(20,24,30,.72); color: #fff; cursor: pointer; display: grid; place-items: center; backdrop-filter: blur(4px); transition: transform .15s, background .15s, opacity .25s; }
+.mp-bigplay:hover { transform: translate(-50%,-50%) scale(1.06); background: rgba(79,140,255,.9); }
+.mp-error { position: absolute; left: 16px; right: 16px; bottom: 16px; padding: 10px 14px; background: rgba(224,86,86,.94); color: #fff; border-radius: 8px; font-size: 13px; }
+.mp-controls { background: linear-gradient(transparent, rgba(0,0,0,.78)); padding: 10px 12px 10px; transition: opacity .25s; }
+.mp-idle .mp-controls, .mp-idle .mp-bigplay { opacity: 0; pointer-events: none; }
+.mp-seek { position: relative; height: 16px; cursor: pointer; display: flex; align-items: center; touch-action: none; }
+.mp-seek::before { content: ''; position: absolute; left: 0; right: 0; height: 5px; border-radius: 3px; background: rgba(255,255,255,.22); }
+.mp-buf { position: absolute; left: 0; height: 5px; border-radius: 3px; background: rgba(255,255,255,.38); }
+.mp-prog { position: absolute; left: 0; height: 5px; border-radius: 3px; background: var(--accent); }
+.mp-knob { position: absolute; width: 13px; height: 13px; border-radius: 50%; background: #fff; transform: translateX(-50%); box-shadow: 0 0 6px rgba(0,0,0,.6); }
+.mp-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: #eef1f5; }
+.mp-btn { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border: none; border-radius: 6px; background: transparent; color: #eef1f5; cursor: pointer; }
+.mp-btn:hover { background: rgba(255,255,255,.14); }
+.mp-speed { width: auto; min-width: 46px; padding: 0 8px; font-size: 13px; font-weight: 600; }
+.mp-time { font-variant-numeric: tabular-nums; font-size: 13px; color: #cdd3dc; margin-left: 4px; white-space: nowrap; }
+.mp-spacer { flex: 1; }
+.mp-vol { width: 92px; accent-color: var(--accent); }
+@media (max-width: 640px) { .mp-vol { width: 56px; } .mp-time { font-size: 12px; } .mp-btn { width: 30px; height: 30px; } }
 
 /* ---------- jobs drawer ---------- */
 .jobdrawer { position: fixed; right: 0; top: 0; bottom: 0; width: min(360px, 100vw); background: var(--panel); border-left: 1px solid var(--border2); box-shadow: var(--shadow); z-index: 850; display: flex; flex-direction: column; }
@@ -602,4 +721,133 @@ svg.icon {
   margin-left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 11.5px;
   background: rgba(240,180,41,.14); color: var(--warn, #f0b429);
   border: 1px solid rgba(240,180,41,.35); white-space: nowrap;
+}
+
+/* ======================================================================
+   "This PC" — drive cards with capacity and disk health
+   ====================================================================== */
+.thispc { flex: 1; overflow: auto; padding: 18px 22px; }
+.drive-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.drive-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; cursor: default;
+}
+.drive-card:hover { border-color: var(--border2); background: var(--bg3); }
+.drive-card .dc-head { display: flex; align-items: flex-start; gap: 12px; }
+.drive-card .dc-ico { width: 32px; height: 32px; color: var(--accent); flex-shrink: 0; }
+.drive-card .dc-title { flex: 1; min-width: 0; }
+.drive-card .dc-name { display: flex; align-items: baseline; gap: 8px; font-weight: 600; font-size: 14.5px; }
+.drive-card .dc-name span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drive-card .dc-letter {
+  font-size: 11.5px; font-weight: 700; letter-spacing: .04em;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0 5px; color: var(--text2); flex-shrink: 0;
+}
+.drive-card .dc-type { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drive-card .dc-bar { height: 8px; background: var(--bg3); border-radius: 4px; overflow: hidden; border: 1px solid var(--border); }
+.drive-card .dc-bar.unknown { background: repeating-linear-gradient(45deg, var(--bg3) 0 6px, var(--border) 6px 12px); }
+.drive-card .dc-bar > i { display: block; height: 100%; transition: width .3s; }
+.drive-card .dc-bar > i.ok { background: var(--accent); }
+.drive-card .dc-bar > i.warn { background: var(--warn); }
+.drive-card .dc-bar > i.err { background: var(--err); }
+.drive-card .dc-cap { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; }
+.drive-card .dc-usage { font-size: 12px; }
+.drive-card .dc-health { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+.badge.err { color: var(--err); border-color: var(--err); }
+.badge.muted { color: var(--text3); }
+
+/* ---------- navigation tree (sidebar) ---------- */
+.nav-branch { display: flex; flex-direction: column; }
+.nav-row { display: flex; align-items: center; }
+.nav-tw {
+  width: 18px; height: 26px; flex-shrink: 0; background: none; border: none; cursor: pointer;
+  color: var(--text3); font-size: 10px; line-height: 1; padding: 0;
+}
+.nav-tw:hover { color: var(--text); }
+.nav-loading { font-size: 12px; padding: 2px 0; }
+.side-item.nav-item { padding: 4px 8px; font-size: 13px; }
+.nav-branch .nav-row .nav-tw + .side-item { flex: 1; min-width: 0; }
+
+/* ---------- address bar ---------- */
+.addrbar {
+  display: flex; align-items: center; flex: 1; min-width: 160px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 1px 4px;
+  cursor: text;
+}
+.addrbar:hover { border-color: var(--border2); }
+.addrbar .crumbs { flex: 1; padding: 2px 2px; }
+.addr-input {
+  flex: 1; border: none; background: none; outline: none; padding: 4px 4px;
+  font-size: 13px; color: var(--text); min-width: 0;
+}
+
+/* ---------- downloads tray ---------- */
+.dltray {
+  position: fixed; right: 14px; bottom: 60px; width: min(340px, calc(100vw - 28px));
+  max-height: 46vh; display: flex; flex-direction: column; background: var(--panel);
+  border: 1px solid var(--border2); border-radius: 10px; box-shadow: var(--shadow);
+  z-index: 810; overflow: hidden;
+}
+.dltray > header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; font-weight: 600; border-bottom: 1px solid var(--border); }
+.dltray > header .ttl { font-size: 13.5px; }
+.dltray .dl-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.dl-row { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; }
+.dl-row.err { border-color: var(--err); }
+.dl-head { display: flex; align-items: center; gap: 6px; }
+.dl-head .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.dl-row .prog { height: 5px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
+.dl-row .prog > i { display: block; height: 100%; background: var(--accent); transition: width .25s linear; }
+.dl-meta { display: flex; gap: 10px; font-size: 11.5px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.dl-err { color: var(--err); font-size: 11.5px; }
+/* The uploads tray sits above it; stack them instead of overlapping. */
+body.dltray-open .uploadtray { bottom: auto; top: 60px; }
+
+/* ---------- backups ---------- */
+.backup-list { display: flex; flex-direction: column; gap: 12px; }
+.backup-card {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg2);
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
+}
+.backup-card .bc-head { display: flex; align-items: center; gap: 10px; }
+.backup-card .bc-head .ico { width: 18px; height: 18px; color: var(--accent); flex-shrink: 0; }
+.backup-card .bc-title { flex: 1; min-width: 0; }
+.backup-card .bc-name { font-weight: 600; font-size: 14px; }
+.backup-card .bc-sub { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.backup-card .prog { height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
+.backup-card .prog > i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+.backup-card .bc-meta { font-size: 12px; }
+.backup-card .bc-err { color: var(--err); font-size: 12px; }
+.backup-card .bc-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.backup-card .bc-actions .btn { font-size: 12.5px; padding: 4px 9px; }
+
+/* ---------- properties / history dialogs ---------- */
+.prop-group { border-top: 1px solid var(--border); padding-top: 10px; }
+.prop-group:first-child { border-top: none; padding-top: 0; }
+.prop-group h4 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text3); }
+.prop-row { display: flex; gap: 12px; padding: 3px 0; font-size: 13px; }
+.prop-k { min-width: 150px; flex-shrink: 0; }
+.prop-v { flex: 1; word-break: break-word; }
+.history-list { display: flex; flex-direction: column; max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.history-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.history-row:last-child { border-bottom: none; }
+.history-row.undone { opacity: .6; }
+.history-row .hi-op { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.field-input { width: 100%; margin-top: 4px; background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font-size: 14px; }
+
+/* ---------- compact tile mode ("List") ---------- */
+.filelist.list .fitem {
+  flex-direction: row; align-items: center; justify-content: flex-start;
+  height: var(--tile-h); padding: 2px 8px; gap: 8px; text-align: left;
+}
+.filelist.list .fitem .visual { width: 20px; height: 20px; flex-shrink: 0; }
+.filelist.list .fitem .visual .ico { width: 18px; height: 18px; }
+.filelist.list .fitem .visual .thumb { width: 20px; height: 20px; border-radius: 3px; }
+.filelist.list .fitem .nm { font-size: 13px; text-align: left; }
+.filelist.list .fitem .fav-mark { position: static; width: 13px; height: 13px; margin-left: -2px; }
+
+@media (max-width: 900px) {
+  .drive-grid { grid-template-columns: 1fr; }
+  .dltray { width: calc(100vw - 28px); }
+  body.dltray-open .uploadtray { top: auto; bottom: 60px; }
 }

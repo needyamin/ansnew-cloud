@@ -94,7 +94,7 @@ ansnew/
 | `mounts` | id, name (unique), adapter (`local`\|`ftp`\|`ftps`\|`sftp`\|`smb`\|`http`), local_root (for local), connection_id (remote), remote_path, quota_bytes, is_readonly, is_visible_all, created_by |
 | `mount_grants` | per-user grants when `is_visible_all = 0` |
 | `connections` | saved remote connections: protocol, host, port, username, auth_type (`password`\|`key`), `secret_enc` (AES-256-GCM), fingerprint, created_by. Plaintext secrets never stored |
-| `jobs` | id (uuid), user_id, type, status (`queued`\|`running`\|`done`\|`error`\|`canceled`), params (json), progress 0–100, message, result (json), timestamps |
+| `jobs` | id (uuid), user_id, type, status (`queued`\|`running`\|`done`\|`error`\|`canceled`), params (json), progress 0–100, message, result (json), attempts, max_attempts, lease_expires_at, next_attempt_at, timestamps |
 | `favorites` | user bookmarks: mount + path + label |
 | `recent_files` | rolling per-user history of opened/downloaded entries |
 | `audit_log` | id, user_id, action, mount, path, target, detail (json), ip, created_at |
@@ -159,6 +159,14 @@ cross mount boundaries, and every path is re-validated server-side.
   download, usage scan) enqueue a `jobs` row and return a job id immediately.
 - `bin/worker.php` claims jobs (transactional), runs the handler, updates progress 0–100,
   and POSTs progress to the WS internal endpoint for fan-out.
+- **Crash recovery.** A claim takes a *lease* (`jobs.lease_expires_at`) and increments
+  `jobs.attempts`. The lease is renewed by every progress update and by
+  `AbstractHandler::checkCancel()` (throttled), so a long job is never mistaken for a
+  dead one. On start the worker calls `JobService::recoverOrphans()` — anything still
+  `running` was orphaned by a previous crash (there is a single worker container) — and
+  while idle it periodically runs `JobService::reapStale()`, which requeues expired jobs
+  with exponential backoff (`jobs.next_attempt_at`) until `jobs.max_attempts` is reached,
+  then fails them. Retries are at-least-once: a requeued handler may repeat side effects.
 - WS events delivered to browsers: `job.progress`, `job.done`, `notify`, `terminal.data`,
   `terminal.exit`. The frontend surfaces toasts + a job drawer with cancel support
   (cancel = `jobs.status='canceled'`; handlers poll a cancellation flag between chunks).

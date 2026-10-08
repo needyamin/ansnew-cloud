@@ -6,6 +6,7 @@ namespace App\Services;
 
 use App\Auth\AuthContext;
 use App\Core\Database;
+use App\Storage\ConnectionService;
 use App\Storage\Mount;
 use App\Storage\StorageManager;
 use App\Support\Validator;
@@ -185,18 +186,48 @@ final class DriveService
     /**
      * Disconnect a drive.
      *
-     * This removes the mount row only. It never touches the underlying storage:
-     * no local directory is deleted, nothing is removed from a remote bucket, and
+     * This removes the mount row. It never touches the underlying storage: no
+     * local directory is deleted, nothing is removed from a remote bucket, and
      * any files stay exactly where they are so the drive can be re-attached.
+     * When this is the last mount using its connection, the now-orphaned
+     * connection is removed too — which frees its (globally unique) name so the
+     * same account can be re-added without a "connection already exists" error.
      */
     public static function disconnect(AuthContext $user, int $id): array
     {
         $mount = self::byId($id);
         self::assertManageable($user, $mount);
+        $connectionId = $mount->connectionId;
 
         Database::i()->run('DELETE FROM mounts WHERE id = :id', [':id' => $id]);
-        AuditService::log($user, 'drive.disconnect', $mount->name, null, null, 'ok', 'row removed only', '', '');
-        return ['disconnected' => true, 'name' => $mount->name, 'dataKept' => true];
+
+        // If this drive was the only thing using its connection, remove the now
+        // orphaned connection as well. Its name is globally unique, so leaving it
+        // behind would block re-adding the same account ("already have a
+        // connection with that name"). Connections still referenced by another
+        // mount are left untouched.
+        $connectionRemoved = false;
+        if ($connectionId !== null) {
+            $stillUsed = Database::i()->one(
+                'SELECT 1 FROM mounts WHERE connection_id = :cid LIMIT 1',
+                [':cid' => $connectionId]
+            );
+            if ($stillUsed === null) {
+                try {
+                    ConnectionService::delete($user, $connectionId);
+                    $connectionRemoved = true;
+                } catch (Throwable) {
+                    // A shared/admin-owned connection the caller may not delete:
+                    // keep it; its name stays reserved by design.
+                }
+            }
+        }
+
+        AuditService::log(
+            $user, 'drive.disconnect', $mount->name, null, null, 'ok',
+            $connectionRemoved ? 'mount + orphaned connection removed' : 'mount removed only', '', ''
+        );
+        return ['disconnected' => true, 'name' => $mount->name, 'dataKept' => true, 'connectionRemoved' => $connectionRemoved];
     }
 
     public static function byId(int $id): Mount

@@ -61,6 +61,9 @@ RUN set -eux; \
 
 # Hardened PHP settings
 COPY docker/php/php.ini /usr/local/etc/php/conf.d/99-ansnew.ini
+# Loaded last (zz-) so it overrides the image's www.conf defaults, notably
+# pm.max_children = 5, which a few concurrent media downloads would exhaust.
+COPY docker/php/fpm-pool.conf /usr/local/etc/php-fpm.d/zz-ansnew.conf
 COPY docker/php/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /var/www/data /srv/storage/local \

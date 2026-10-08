@@ -48,16 +48,28 @@ abstract class AbstractHandler
         );
     }
 
+    /** Throttle for the lease heartbeat below (unix time). */
+    private static int $lastBeat = 0;
+
     protected static function checkCancel(string $jobId): void
     {
+        // Called frequently between chunks, so renew the job lease here too —
+        // a long job that reports no progress must not be reaped as stale.
+        // Throttled: the lease is minutes long, so a write per chunk is waste.
+        $now = time();
+        if ($now - self::$lastBeat >= 30) {
+            self::$lastBeat = $now;
+            JobService::heartbeat($jobId, $now);
+        }
         if (JobService::isCanceled($jobId)) {
             throw new RuntimeException('Job canceled');
         }
     }
 
-    protected static function progress(string $jobId, int $percent, string $message = ''): void
+    /** @param array<string,mixed> $meta live stats forwarded to the UI (bytes, speed, ETA…) */
+    protected static function progress(string $jobId, int $percent, string $message = '', array $meta = []): void
     {
-        JobService::progress($jobId, $percent, $message);
+        JobService::progress($jobId, $percent, $message, $meta);
     }
 
     protected static function uuid(): string

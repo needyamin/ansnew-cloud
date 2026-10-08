@@ -50,6 +50,94 @@ final class UsageService
         return $result;
     }
 
+    /**
+     * A mount's contents changed: flag its cached usage as stale and queue a
+     * re-scan so the figure self-corrects.
+     *
+     * Usage is a *snapshot* cached in `settings` (written by scan() through the
+     * `du` job). Nothing used to invalidate it, so after a delete or upload the
+     * sidebar kept reporting the old size indefinitely — the number only ever
+     * changed if the user manually re-scanned.
+     *
+     * The cached figure is kept (so the sidebar does not flash to "Not
+     * scanned"); it is only flagged, and the re-scan replaces it.
+     */
+    public static function invalidate(string $mountName, int $userId = 0): void
+    {
+        if ($mountName === '') {
+            return;
+        }
+        $db = Database::i();
+        $raw = $db->scalar('SELECT v FROM settings WHERE k = :k', [':k' => 'usage:' . $mountName]);
+
+        // Never measured: nothing to invalidate. The first browse kicks off a
+        // scan (see ensureDriveUsage in main.js); we do not want every mutation
+        // on an unmeasured mount to spawn a full remote listing.
+        if ($raw === null) {
+            return;
+        }
+        $data = json_decode((string) $raw, true);
+        if (is_array($data) && empty($data['stale'])) {
+            $data['stale'] = true;
+            $db->run(
+                'UPDATE settings SET v = :v, updated_at = datetime(\'now\') WHERE k = :k',
+                [':k' => 'usage:' . $mountName, ':v' => json_encode($data, JSON_UNESCAPED_UNICODE) ?: '{}']
+            );
+        }
+        self::requestRescan($mountName, $userId, false);
+    }
+
+    /**
+     * Queue a `du` re-scan for one mount.
+     *
+     * Deduplicated (a queued/running scan for the same mount already covers us)
+     * and throttled, because one batch operation emits many fs.changed events
+     * and a full remote listing is not free.
+     *
+     * @param bool $force skip the throttle (an explicit user-triggered rescan)
+     * @return string|null the queued job id, or null when one was already pending
+     */
+    public static function requestRescan(string $mountName, int $userId = 0, bool $force = false): ?string
+    {
+        if ($mountName === '') {
+            return null;
+        }
+        $db = Database::i();
+
+        // Dedup: match on the mount name inside the stored params JSON. Mount
+        // names are [A-Za-z0-9_-] (validated at creation), so this LIKE is safe.
+        $pending = (int) $db->scalar(
+            "SELECT COUNT(*) FROM jobs
+              WHERE type = 'du' AND status IN ('queued','running') AND params LIKE :p",
+            [':p' => '%"mount":"' . $mountName . '"%']
+        );
+        if ($pending > 0) {
+            return null;
+        }
+
+        $key = 'usage_req:' . $mountName;
+        $window = \App\Config\Config::i()->getInt('USAGE_RESCAN_DEBOUNCE', 30);
+        if (!$force && $window > 0) {
+            $last = (int) $db->scalar('SELECT v FROM settings WHERE k = :k', [':k' => $key]);
+            if ($last > 0 && (time() - $last) < $window) {
+                return null;
+            }
+        }
+
+        try {
+            $jobId = JobService::enqueue($userId, 'du', ['mount' => $mountName, 'userId' => $userId]);
+        } catch (Throwable $e) {
+            error_log('[ansnew] usage rescan enqueue failed: ' . $e->getMessage());
+            return null;
+        }
+        $db->run(
+            'INSERT INTO settings (k, v, updated_at) VALUES (:k, :v, datetime(\'now\'))
+             ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = datetime(\'now\')',
+            [':k' => $key, ':v' => (string) time()]
+        );
+        return $jobId;
+    }
+
     /** Cached usage for all mounts visible to the user (null when never scanned). */
     public static function cached(AuthContext $user): array
     {

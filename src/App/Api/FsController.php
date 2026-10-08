@@ -503,7 +503,45 @@ final class FsController
         return Response::ok(['results' => $results]);
     }
 
-    /** Stream a file download (Range requests honored for local mounts). */
+    /**
+     * Resolve a byte range for a streamed file and open the adapter at its start.
+     *
+     * Returns null when the range is unsatisfiable (the caller must send 416).
+     *
+     * @return array{stream:resource,start:int,end:int,length:int,size:int,partial:bool}|null
+     */
+    private static function openRanged(Request $req, $adapter, string $norm, int $size): ?array
+    {
+        $range = \App\Support\HttpRange::parse($req->header('range'), $size);
+        if ($range['partial'] && $range['end'] < $range['start']) {
+            return null; // unsatisfiable -> 416
+        }
+        $start = $range['start'];
+        $end = $range['end'];
+        $length = $size > 0 ? ($end - $start + 1) : 0;
+        $stream = $size > 0 ? $adapter->getStream($norm, $start, $end) : $adapter->getStream($norm);
+        return [
+            'stream' => $stream,
+            'start' => $start,
+            'end' => $end,
+            'length' => $length,
+            'size' => $size,
+            'partial' => $range['partial'],
+        ];
+    }
+
+    /** Add the headers every ranged stream response needs. */
+    private static function withRangeHeaders(Response $resp, array $r): Response
+    {
+        $resp->withHeader('Content-Length', (string) $r['length']);
+        $resp->withHeader('Accept-Ranges', 'bytes');
+        if ($r['partial']) {
+            $resp->withHeader('Content-Range', 'bytes ' . $r['start'] . '-' . $r['end'] . '/' . $r['size']);
+        }
+        return $resp;
+    }
+
+    /** Stream a file download (HTTP Range honored for resumable/streamed transfers). */
     public static function download(Request $req, SessionManager $session, string $mount): Response
     {
         $user = Guard::requireUser($session);
@@ -517,17 +555,53 @@ final class FsController
         FavoritesService::recordRecent($user, $mount, $norm, (string) $stat['name'], 'download');
         AuditService::log($user, 'fs.download', $mount, $norm, null, 'ok', '', $req->ip(), $req->userAgent());
 
-        $stream = $adapter->getStream($norm);
-        $resp = new Response(200, '');
+        $size = (int) ($stat['size'] ?? 0);
+        $r = self::openRanged($req, $adapter, $norm, $size);
+        if ($r === null) {
+            $resp = new Response(416, '');
+            $resp->withHeader('Content-Range', 'bytes */' . $size);
+            $resp->withHeader('Accept-Ranges', 'bytes');
+            return $resp;
+        }
+
+        $resp = new Response($r['partial'] ? 206 : 200, '');
         $resp->withHeader('Content-Type', 'application/octet-stream');
-        $resp->withHeader('Content-Length', (string) $stat['size']);
         $resp->withHeader('Content-Disposition', 'attachment; filename="' . self::asciiFallback((string) $stat['name']) . '"; filename*=UTF-8\'\'' . rawurlencode((string) $stat['name']));
         $resp->withHeader('X-Content-Type-Options', 'nosniff');
         $resp->withHeader('Cache-Control', 'no-store');
-        return $resp->withStream($stream, (int) $stat['size']);
+        self::withRangeHeaders($resp, $r);
+        return $resp->withStream($r['stream'], $r['length']);
     }
 
     /** Inline preview (images/text/media) with a sandboxed content type. */
+    /**
+     * GET /api/fs/{mount}/text — file contents plus the metadata the code editor
+     * needs (line ending, BOM, a hash to guard against clobbering).
+     */
+    public static function text(Request $req, SessionManager $session, string $mount): Response
+    {
+        $user = Guard::requireUser($session);
+        $path = (string) $req->query('path', '');
+        return Response::ok(FileService::readText($user, Validator::mountName($mount), $path));
+    }
+
+    /** POST /api/fs/{mount}/write — save the code editor's contents. */
+    public static function write(Request $req, SessionManager $session, string $mount): Response
+    {
+        $user = Guard::requireUser($session);
+        $body = $req->json();
+        $path = (string) ($body['path'] ?? '');
+        $content = (string) ($body['content'] ?? '');
+        $baseHash = isset($body['baseHash']) && is_string($body['baseHash']) && $body['baseHash'] !== ''
+            ? $body['baseHash']
+            : null;
+
+        $r = FileService::writeText($user, Validator::mountName($mount), $path, $content, $baseHash);
+        AuditService::log($user, 'fs.write', $mount, $r['path'], null, 'ok', $r['written'] . ' bytes', $req->ip(), $req->userAgent());
+        NotifyService::fsChanged($user->id, [$mount => [PathGuard::dirname($r['path'])]], 'write');
+        return Response::ok($r);
+    }
+
     public static function preview(Request $req, SessionManager $session, string $mount): Response
     {
         $user = Guard::requireUser($session);
@@ -544,14 +618,22 @@ final class FsController
         }
         FavoritesService::recordRecent($user, $mount, $norm, (string) $stat['name'], 'preview');
 
-        $stream = $adapter->getStream($norm);
-        $resp = new Response(200, '');
+        $size = (int) ($stat['size'] ?? 0);
+        $r = self::openRanged($req, $adapter, $norm, $size);
+        if ($r === null) {
+            $resp = new Response(416, '');
+            $resp->withHeader('Content-Range', 'bytes */' . $size);
+            $resp->withHeader('Accept-Ranges', 'bytes');
+            return $resp;
+        }
+
+        $resp = new Response($r['partial'] ? 206 : 200, '');
         $resp->withHeader('Content-Type', $mime);
-        $resp->withHeader('Content-Length', (string) $stat['size']);
         $resp->withHeader('X-Content-Type-Options', 'nosniff');
         $resp->withHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; object-src 'self' blob:");
         $resp->withHeader('Cache-Control', 'private, max-age=60');
-        return $resp->withStream($stream, (int) $stat['size']);
+        self::withRangeHeaders($resp, $r);
+        return $resp->withStream($r['stream'], $r['length']);
     }
 
     /**
@@ -604,6 +686,48 @@ final class FsController
             'mount' => $mount, 'path' => (string) ($body['path'] ?? ''),
         ]);
         return Response::ok(['job' => $jobId]);
+    }
+
+    /**
+     * POST /api/fs/{mount}/download-selection
+     * {"paths":["/a.txt","/docs"], "name":"my-files.zip"}
+     *
+     * Packages any mix of files and folders into one zip on the worker. This is
+     * what "Download N items" and "Download folder as ZIP" both call, so a
+     * mixed selection behaves the same as a single folder.
+     */
+    public static function downloadSelection(Request $req, SessionManager $session, string $mount): Response
+    {
+        $user = Guard::requireUser($session);
+        $body = $req->json();
+        $raw = $body['paths'] ?? null;
+        $paths = is_array($raw) ? array_values(array_map('strval', $raw)) : [];
+        if (!$paths) {
+            return Response::error('Nothing selected', 400, 'bad_request');
+        }
+        if (count($paths) > 500) {
+            return Response::error('Too many items in one download (max 500)', 400, 'too_many');
+        }
+        foreach ($paths as $p) {
+            if (PathGuard::normalize($p) === '/') {
+                return Response::error('Select subfolders instead of the drive root', 400, 'bad_request');
+            }
+        }
+
+        $name = trim((string) ($body['name'] ?? ''));
+        if ($name === '') {
+            $name = count($paths) === 1
+                ? PathGuard::basename(PathGuard::normalize($paths[0])) . '.zip'
+                : 'download-' . count($paths) . '-items.zip';
+        }
+
+        $jobId = JobService::enqueue($user->id, 'download-selection', [
+            'mount' => $mount,
+            'paths' => $paths,
+            'name' => $name,
+        ]);
+        AuditService::log($user, 'fs.download.selection', $mount, null, $name, 'ok', 'job ' . $jobId, $req->ip(), $req->userAgent());
+        return Response::ok(['job' => $jobId, 'name' => $name]);
     }
 
     /** Consume a one-shot folder-download token. */

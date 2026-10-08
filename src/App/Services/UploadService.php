@@ -247,6 +247,36 @@ final class UploadService
         return $base;
     }
 
+    /**
+     * Remove upload staging directories abandoned mid-upload.
+     *
+     * Chunks are staged as PLAINTEXT before assembly, so a chunked upload that is
+     * never completed leaves plaintext on disk indefinitely. Called from the
+     * worker sweep (bin/worker.php).
+     */
+    public static function sweepStaging(int $maxAgeSeconds = 86400): int
+    {
+        $dir = \App\Config\Config::i()->dataDir() . '/tmp';
+        $removed = 0;
+        foreach (glob($dir . '/up-*', GLOB_ONLYDIR) ?: [] as $stage) {
+            if (!is_dir($stage)) {
+                continue;
+            }
+            $newest = (int) @filemtime($stage);
+            foreach (glob($stage . '/*') ?: [] as $f) {
+                $m = (int) @filemtime($f);
+                if ($m > $newest) {
+                    $newest = $m;
+                }
+            }
+            if ($newest > 0 && (time() - $newest) > $maxAgeSeconds) {
+                self::rrmdir($stage);
+                $removed++;
+            }
+        }
+        return $removed;
+    }
+
     private static function conflictTarget(\App\Storage\StorageAdapter $adapter, string $dir, string $name, string $conflict): ?string
     {
         $base = PathGuard::join($dir, $name);

@@ -36,9 +36,14 @@ export class ApiError extends Error {
 const lanes = {
   read: { max: 6, active: 0, q: [] },
   write: { max: 4, active: 0, q: [] },
+  // Uploads get their own lane so a burst of other writes can never starve them.
+  // Sharing the write lane let an upload sit queued behind unrelated mutations
+  // and look like an upload that simply never starts.
+  upload: { max: 3, active: 0, q: [] },
 };
 
-function laneFor(method) {
+function laneFor(method, url) {
+  if (typeof url === 'string' && url.includes('/api/upload/')) return lanes.upload;
   return (method === 'GET' || method === 'HEAD') ? lanes.read : lanes.write;
 }
 
@@ -115,7 +120,7 @@ async function request(method, url, body, opts = {}) {
 
   let res;
   try {
-    res = await withLane(laneFor(method), async () => {
+    res = await withLane(laneFor(method, url), async () => {
       const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
       try {
         return await fetch(url, {

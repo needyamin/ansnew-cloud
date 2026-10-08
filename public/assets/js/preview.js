@@ -1,16 +1,39 @@
 'use strict';
-/* Preview modal: images, video/audio, PDF, text/code, markdown, hex fallback. */
-import { el, clear, fmtSize, renderMarkdown, debounce } from './util.js';
-import { api } from './api.js';
+/* Preview modal: images, video/audio, PDF, hex fallback.
+ *
+ * Text and code files do NOT come here — they open in the built-in editor
+ * (editor.js) so they can be edited rather than just read. */
+import { el, clear, fmtSize } from './util.js';
 import { icon } from './icons.js';
-import { state } from './state.js';
-
-const TEXT_EXT = new Set(['txt', 'md', 'markdown', 'json', 'js', 'mjs', 'ts', 'css', 'html', 'htm', 'xml', 'yml', 'yaml', 'toml', 'ini', 'conf', 'log', 'sql', 'sh', 'py', 'c', 'cpp', 'h', 'go', 'rs', 'java', 'rb', 'php', 'csv']);
-const TEXT_MAX = 2 * 1024 * 1024; // 2 MiB cap for text preview
+import { buildMediaPlayer } from './player.js';
+import { toastErr } from './ui.js';
+import { openEditor, isTextEntry, TEXT_EXT } from './editor.js';
 
 export function preview(entry, mount) {
+  // Text/code files open in the code editor. `openEditor` returns false only
+  // when the file turned out not to be text after all (the server sniffs for
+  // binary content), in which case the hex view below takes over.
+  if (isTextEntry(entry)) {
+    openEditor(entry, mount)
+      .then((handled) => { if (!handled) previewBytes(entry, mount); })
+      // Never fail silently. A throw inside the editor's overlay builder used to
+      // leave the user with no editor and no message at all — the server logged a
+      // 200 and the click simply appeared to do nothing.
+      .catch((err) => {
+        console.error('[editor] could not open', entry.path || entry.name, err);
+        toastErr('Could not open the editor: ' + (err && err.message ? err.message : 'unknown error'));
+        previewBytes(entry, mount);
+      });
+    return;
+  }
+  previewBytes(entry, mount);
+}
+
+function previewBytes(entry, mount) {
   const path = entry.path || entry.name;
   const url = `/api/fs/${encodeURIComponent(mount)}/preview?path=${encodeURIComponent(path)}`;
+  const downloadUrl = `/api/fs/${encodeURIComponent(mount)}/download?path=${encodeURIComponent(path)}`;
+  let cleanup = null;
 
   const bar = el('div', { class: 'preview-bar' },
     icon(iconName(entry), ''),
@@ -21,15 +44,21 @@ export function preview(entry, mount) {
   );
   const body = el('div', { class: 'preview-body' }, el('span', { class: 'muted spin', text: 'Loading…' }));
   const ov = el('div', { class: 'preview-overlay' }, bar, body);
-  function close() { document.removeEventListener('keydown', onKey); ov.remove(); if (body.querySelector('video, audio')) { const m = body.querySelector('video, audio'); try { m.pause(); } catch (_) {} } }
+  function close() {
+    document.removeEventListener('keydown', onKey);
+    if (cleanup) { try { cleanup(); } catch (_) {} cleanup = null; }
+    ov.remove();
+  }
   function onKey(e) { if (e.key === 'Escape') close(); }
   document.addEventListener('keydown', onKey);
   document.body.appendChild(ov);
 
-  renderInto(body, entry, url).catch(err => {
-    clear(body);
-    body.appendChild(el('div', { class: 'muted', text: 'Preview unavailable: ' + err.message }));
-  });
+  Promise.resolve(renderInto(body, entry, url, downloadUrl))
+    .then((fn) => { cleanup = typeof fn === 'function' ? fn : null; })
+    .catch(err => {
+      clear(body);
+      body.appendChild(el('div', { class: 'muted', text: 'Preview unavailable: ' + err.message }));
+    });
 }
 
 function iconName(entry) {
@@ -42,7 +71,7 @@ function iconName(entry) {
   return 'file';
 }
 
-async function renderInto(body, entry, url) {
+async function renderInto(body, entry, url, downloadUrl) {
   const e = (entry.extension || '').toLowerCase();
   const mime = entry.mime || '';
   clear(body);
@@ -55,27 +84,17 @@ async function renderInto(body, entry, url) {
   }
   if (['mp4', 'webm', 'mkv', 'mov', 'mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(e) || mime.startsWith('video/') || mime.startsWith('audio/')) {
     const isAudio = mime.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(e);
-    body.appendChild(el(isAudio ? 'audio' : 'video', { src: url, controls: true, autoplay: false }));
-    return;
+    const player = buildMediaPlayer({ url, downloadUrl, isAudio, title: entry.name });
+    body.appendChild(player.node);
+    return player.destroy;
   }
   if (e === 'pdf' || mime === 'application/pdf') {
     const obj = el('object', { type: 'application/pdf', data: url });
     body.appendChild(obj);
     return;
   }
-  if (TEXT_EXT.has(e) || mime.startsWith('text/')) {
-    if ((entry.size || 0) > TEXT_MAX) { body.appendChild(el('div', { class: 'muted', text: 'Text file too large to preview (2 MiB limit).' })); return; }
-    const text = await api.text(url, TEXT_MAX + 1);
-    if (['md', 'markdown'].includes(e)) {
-      const div = el('div', { class: 'md' });
-      div.innerHTML = renderMarkdown(text);
-      body.appendChild(div);
-    } else {
-      body.appendChild(el('pre', { text: text }));
-    }
-    return;
-  }
-  // hex fallback (first 4 KiB)
+  // hex fallback (first 4 KiB) — also what a text file lands on when the server
+  // sniffs binary content in it (see openEditor in editor.js).
   const res = await fetch(url);
   const buf = await res.arrayBuffer();
   const bytes = new Uint8Array(buf.slice(0, 4096));

@@ -46,7 +46,13 @@ final class Routes
         $r->post('/api/fs/{mount}/extract', fn($req, $m) => FsController::extract($req, $session, $m));
         $r->get('/api/fs/{mount}/search', fn($req, $m) => FsController::search($req, $session, $m));
         $r->get('/api/fs/{mount}/download', fn($req, $m) => FsController::download($req, $session, $m));
+        // Any mix of files and folders -> one zip, prepared by the worker.
+        $r->post('/api/fs/{mount}/download-selection', fn($req, $m) => FsController::downloadSelection($req, $session, $m));
         $r->get('/api/fs/{mount}/preview', fn($req, $m) => FsController::preview($req, $session, $m));
+        // Text files open in the built-in code editor: read the contents, then
+        // save them back (with a hash guard against clobbering a concurrent edit).
+        $r->get('/api/fs/{mount}/text', fn($req, $m) => FsController::text($req, $session, $m));
+        $r->post('/api/fs/{mount}/write', fn($req, $m) => FsController::write($req, $session, $m));
         $r->get('/api/fs/{mount}/thumb', fn($req, $m) => FsController::thumb($req, $session, $m));
         $r->get('/api/fs/{mount}/stat', fn($req, $m) => FsController::stat($req, $session, $m));
         $r->post('/api/fs/{mount}/download-folder', fn($req, $m) => FsController::downloadFolder($req, $session, $m));
@@ -60,6 +66,9 @@ final class Routes
         // ---- drives (user-facing mount management) ----
         $r->get('/api/drives', fn($req) => DriveController::list($req, $session));
         $r->get('/api/drives/types', fn($req) => DriveController::types($req, $session));
+        // "This PC": capacity, type and health for every visible drive.
+        $r->get('/api/drives/info', fn($req) => DriveController::info($req, $session));
+        $r->get('/api/drives/{name}/health', fn($req, $m) => DriveController::health($req, $session, $m));
         $r->post('/api/drives', fn($req) => DriveController::create($req, $session));
         $r->post('/api/drives/{id}/rename', fn($req, $id) => DriveController::rename($req, $session, (int) $id));
         $r->delete('/api/drives/{id}', fn($req, $id) => DriveController::disconnect($req, $session, (int) $id));
@@ -85,6 +94,23 @@ final class Routes
         // ---- jobs ----
         $r->get('/api/jobs', fn($req) => JobController::list($req, $session));
         $r->post('/api/jobs/{id}/cancel', fn($req, $id) => JobController::cancel($req, $session, $id));
+
+        // ---- full-drive backup ----
+        $r->get('/api/backups', fn($req) => BackupController::index($req, $session));
+        $r->post('/api/backups', fn($req) => BackupController::start($req, $session));
+        $r->get('/api/backups/{id}', fn($req, $id) => BackupController::show($req, $session, $id));
+        $r->post('/api/backups/{id}/pause', fn($req, $id) => BackupController::pause($req, $session, $id));
+        $r->post('/api/backups/{id}/resume', fn($req, $id) => BackupController::resume($req, $session, $id));
+        $r->post('/api/backups/{id}/cancel', fn($req, $id) => BackupController::cancel($req, $session, $id));
+        $r->post('/api/backups/{id}/verify', fn($req, $id) => BackupController::verify($req, $session, $id));
+        $r->delete('/api/backups/{id}', fn($req, $id) => BackupController::forget($req, $session, $id));
+
+        // ---- undo / redo ----
+        $r->get('/api/history', fn($req) => HistoryController::index($req, $session));
+        $r->post('/api/history', fn($req) => HistoryController::record($req, $session));
+        $r->post('/api/history/undo', fn($req) => HistoryController::undo($req, $session));
+        $r->post('/api/history/redo', fn($req) => HistoryController::redo($req, $session));
+        $r->delete('/api/history', fn($req) => HistoryController::clear($req, $session));
 
         // ---- favorites / recent ----
         $r->get('/api/favorites', fn($req) => FavoritesController::list($req, $session));

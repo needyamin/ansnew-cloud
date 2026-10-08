@@ -85,6 +85,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     message     TEXT NOT NULL DEFAULT '',
     result      TEXT,
     cancel_flag INTEGER NOT NULL DEFAULT 0,
+    -- Crash recovery. A job whose worker dies is requeued once its lease
+    -- expires, up to max_attempts, then failed (see JobService).
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    max_attempts     INTEGER NOT NULL DEFAULT 3,
+    lease_expires_at INTEGER,                       -- unix epoch
+    next_attempt_at  INTEGER,                       -- unix epoch (retry backoff)
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     started_at  TEXT,
     finished_at TEXT
@@ -193,6 +199,48 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     version    TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Full-drive backups. One row per backup run; the per-file manifest is written
+-- as JSONL into the data directory (a whole drive does not belong in one row).
+CREATE TABLE IF NOT EXISTS backups (
+    id            TEXT PRIMARY KEY,             -- uuid v4
+    user_id       INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    source_mount  TEXT NOT NULL,                -- drive being backed up
+    source_path   TEXT NOT NULL DEFAULT '/',    -- subtree (default: the whole drive)
+    dest_mount    TEXT NOT NULL,                -- drive receiving the copy
+    dest_path     TEXT NOT NULL,                -- backup root folder
+    label         TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'queued'
+                  CHECK (status IN ('queued','running','paused','done','error','canceled','verifying','verified','verify-failed')),
+    job_id        TEXT,                         -- current/last job driving this run
+    phase         TEXT NOT NULL DEFAULT '',     -- scanning | copying | verifying | …
+    files_total   INTEGER NOT NULL DEFAULT 0,
+    files_done    INTEGER NOT NULL DEFAULT 0,
+    bytes_total   INTEGER NOT NULL DEFAULT 0,
+    bytes_done    INTEGER NOT NULL DEFAULT 0,
+    error         TEXT,
+    manifest      TEXT,                         -- path to the JSONL manifest
+    started_at    TEXT,
+    finished_at   TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_backups_user ON backups(user_id, created_at DESC);
+
+-- File-operation history backing Undo/Redo. Each row stores enough to reverse
+-- the operation; `undone` marks a step that has been rolled back (the redo side
+-- of the stack). A new operation truncates that tail, like every editor.
+CREATE TABLE IF NOT EXISTS op_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    op          TEXT NOT NULL,                  -- move | copy | rename | delete | mkdir | restore
+    mount       TEXT NOT NULL DEFAULT '',
+    summary     TEXT NOT NULL DEFAULT '',
+    payload     TEXT NOT NULL DEFAULT '{}',     -- invertible operation detail (json)
+    undone      INTEGER NOT NULL DEFAULT 0,     -- 1 = rolled back and redoable
+    undone_at   TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_history_user ON op_history(user_id, id DESC);
 
 -- Tracks files dropped into the NAS SMB inbox so the watcher imports each once.
 CREATE TABLE IF NOT EXISTS nas_inbox (

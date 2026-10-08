@@ -369,6 +369,13 @@ final class LocalAdapter implements StorageAdapter
         if ($fh === false) {
             throw new RuntimeException('Cannot open file for reading');
         }
+        // Seek to the range start so HTTP Range requests can stream/seek a large
+        // file without reading it from byte 0. The response layer bounds the
+        // number of bytes written, so $to needs no handling here.
+        if ($from > 0 && fseek($fh, $from) !== 0) {
+            fclose($fh);
+            throw new RuntimeException('Cannot seek in file');
+        }
         return $fh;
     }
 

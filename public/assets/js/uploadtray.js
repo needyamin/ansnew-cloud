@@ -11,6 +11,7 @@
 import { el, clear, fmtSize } from './util.js';
 import { uploadBatch } from './upload.js';
 import { syntheticEntry, joinPath } from './mutation.js';
+import { toastErr } from './ui.js';
 
 let tray = null;
 let listNode = null;
@@ -77,18 +78,24 @@ export function runUploadsWithUI(files, mount, dir, conflict, onFinished, opts =
   // existing file's row. They are swapped for the real entries on completion.
   const provisional = new Map();   // file -> tmpPath
   if (onScreen) {
-    const adds = [];
-    for (const f of files) {
-      // For a folder upload the relative path is what identifies the file, so
-      // the provisional row carries it too.
-      const rel = relPathFor ? (relPathFor(f) || f.name) : f.name;
-      const tmp = joinPath(dir, `__uploading__/${rel}`);
-      provisional.set(f, tmp);
-      adds.push(syntheticEntry(tmp, f.name, 'file', f.size));
+    try {
+      const adds = [];
+      for (const f of files) {
+        // For a folder upload the relative path is what identifies the file, so
+        // the provisional row carries it too.
+        const rel = relPathFor ? (relPathFor(f) || f.name) : f.name;
+        const tmp = joinPath(dir, `__uploading__/${rel}`);
+        provisional.set(f, tmp);
+        adds.push(syntheticEntry(tmp, f.name, 'file', f.size));
+      }
+      pane.applyLocal({ add: adds });
+      for (const e of adds) pane.pending.add(e.path);
+      pane.refreshDecorations();
+    } catch (e) {
+      // These rows are purely cosmetic. A UI hiccup here must NEVER stop the
+      // upload from being sent — that produced "row appears, nothing uploads".
+      console.error('[upload] provisional rows failed:', e);
     }
-    pane.applyLocal({ add: adds });
-    for (const e of adds) pane.pending.add(e.path);
-    pane.refreshDecorations();
   }
 
   const dropProvisional = (f) => {
@@ -99,22 +106,28 @@ export function runUploadsWithUI(files, mount, dir, conflict, onFinished, opts =
     pane.applyLocal({ remove: [tmp] });
   };
 
-  for (const f of files) {
-    const bar = el('i', { style: 'width:100%' });
-    const ctrl = new AbortController();
-    const row = el('div', { class: 'uprow' },
-      el('div', { class: 'r' },
-        el('span', { class: 'n', text: f.name }),
-        el('span', { class: 'muted', text: fmtSize(f.size) }),
-        el('button', { class: 'btn icon', title: 'Cancel', text: '×', onclick: () => ctrl.abort() }),
-      ),
-      el('div', { class: 'prog' }, bar),
-    );
-    rows.set(f, { row, bar, ctrl });
-    listNode.appendChild(row);
+  try {
+    for (const f of files) {
+      const bar = el('i', { style: 'width:100%' });
+      const ctrl = new AbortController();
+      const row = el('div', { class: 'uprow' },
+        el('div', { class: 'r' },
+          el('span', { class: 'n', text: f.name }),
+          el('span', { class: 'muted', text: fmtSize(f.size) }),
+          el('button', { class: 'btn icon', title: 'Cancel', text: '×', onclick: () => ctrl.abort() }),
+        ),
+        el('div', { class: 'prog' }, bar),
+      );
+      rows.set(f, { row, bar, ctrl });
+      listNode.appendChild(row);
+    }
+  } catch (e) {
+    // The progress tray is cosmetic; never let it block the upload.
+    console.error('[upload] tray rows failed:', e);
   }
 
   const uploaded = [];
+  console.debug('[upload] starting', files.length, 'file(s) ->', mount + dir);
 
   return uploadBatch(files, mount, dir, conflict,
     (f, loaded, total) => {
@@ -149,5 +162,12 @@ export function runUploadsWithUI(files, mount, dir, conflict, onFinished, opts =
       maybeHide();
       return uploaded;
     })
-    .catch(() => uploaded);
+    .catch((e) => {
+      // Never swallow a failure. An upload that dies before the request is even
+      // sent used to leave the provisional row hanging with no explanation.
+      console.error('[upload] batch failed:', e);
+      try { toastErr('Upload failed: ' + ((e && e.message) || e)); } catch (_) { /* no UI yet */ }
+      maybeHide();
+      return uploaded;
+    });
 }

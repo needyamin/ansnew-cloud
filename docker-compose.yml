@@ -1,5 +1,14 @@
 name: ansnew-cloud
 
+# Shared log rotation. Without this the Docker json-file driver grows without
+# bound — the app also writes its own log inside the data volume, so both need
+# a cap. See docs/DEPLOY.md.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   nginx:
     build:
@@ -7,7 +16,19 @@ services:
       dockerfile: docker/nginx/Dockerfile
     image: ansnew/nginx
     ports:
+      # The app itself. Published for a local/dev instance; in production keep
+      # it closed in the firewall (only 80/443 should be reachable).
       - "${HTTP_PORT:-8080}:8080"
+      # Public HTTP: serves the ACME challenge and 301-redirects to HTTPS.
+      - "${PUBLIC_HTTP_PORT:-80}:8082"
+      # Public HTTPS (TLS terminated by nginx, proxied to the app listener).
+      - "${HTTPS_PORT:-443}:8443"
+    volumes:
+      # TLS material, kept OUTSIDE the project (and outside OneDrive) so the
+      # private key is never cloud-synced. See scripts/make-cert.sh.
+      - ${CERTS_HOST_PATH:-./certs}:/etc/nginx/certs:ro
+      # certbot's HTTP-01 challenge directory (read-only into nginx).
+      - ${ACME_WEBROOT_HOST_PATH:-./acme-webroot}:/var/www/acme:ro
     depends_on:
       php:
         condition: service_healthy
@@ -20,6 +41,10 @@ services:
       retries: 10
       start_period: 15s
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 256m
+    cpus: "1.0"
+    pids_limit: 256
     networks: [ansnew]
 
   php:
@@ -35,6 +60,9 @@ services:
       - data_volume:/var/www/data
       - storage_volume:/srv/storage
       - ${STORAGE_HOST_PATH:-./storage-root}:/srv/storage/local
+      # DB + encryption-key backup output (ansnew:backup). Kept outside the data
+      # volume so `docker compose down -v` cannot take the backups with it.
+      - ${BACKUP_HOST_PATH:-./backups}:/backups
     depends_on:
       db:
         condition: service_healthy
@@ -46,6 +74,10 @@ services:
       retries: 10
       start_period: 40s
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 2g
+    cpus: "2.0"
+    pids_limit: 512
     networks: [ansnew]
 
   worker:
@@ -62,10 +94,15 @@ services:
       - data_volume:/var/www/data
       - storage_volume:/srv/storage
       - ${STORAGE_HOST_PATH:-./storage-root}:/srv/storage/local
+      - ${BACKUP_HOST_PATH:-./backups}:/backups
     depends_on:
       php:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 2g
+    cpus: "2.0"
+    pids_limit: 512
     networks: [ansnew]
 
   ws:
@@ -91,6 +128,10 @@ services:
       retries: 10
       start_period: 20s
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 256m
+    cpus: "1.0"
+    pids_limit: 256
     networks: [ansnew]
 
   # --- NAS (SMB) option -----------------------------------------------------
