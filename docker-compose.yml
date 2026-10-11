@@ -59,7 +59,9 @@ services:
       context: .
       dockerfile: docker/php/Dockerfile
     image: ${IMAGE_PHP:-ansnew/php}
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       APP_ENV: production
       APP_ROLE: api
@@ -73,6 +75,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+        # db only exists under the `mysql` profile; without this key a
+        # plain (sqlite) deployment fails validation with "depends on
+        # undefined service db".
         required: false
     healthcheck:
       test: ["CMD-SHELL", "php -r 'exit(0);' && test -w /var/www/data"]
@@ -92,7 +97,9 @@ services:
       context: .
       dockerfile: docker/php/Dockerfile
     image: ${IMAGE_PHP:-ansnew/php}
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       APP_ENV: production
       APP_ROLE: worker
@@ -117,7 +124,9 @@ services:
       context: .
       dockerfile: docker/ws/Dockerfile
     image: ${IMAGE_WS:-ansnew/ws}
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       APP_ROLE: ws
       WS_PORT: 3001
@@ -152,7 +161,9 @@ services:
       context: .
       dockerfile: docker/nas/Dockerfile
     image: ${IMAGE_NAS:-ansnew/nas}
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       NAS_SHARE_NAME: ${NAS_SHARE_NAME:-ansnew}
       NAS_USER: ${NAS_USER:-ansnew}
@@ -171,7 +182,9 @@ services:
       context: .
       dockerfile: docker/php/Dockerfile
     image: ${IMAGE_PHP:-ansnew/php}
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       APP_ENV: production
       APP_ROLE: nas-watch
@@ -186,10 +199,12 @@ services:
   db:
     image: mariadb:11
     profiles: ["mysql"]
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       MARIADB_ROOT_PASSWORD: ${DB_PASSWORD}
-      MARIADB_DATABASE: ${DB_NAME}
+      MARIADB_DATABASE: ${DB_NAME:-ansnew}
       MARIADB_USER: ${DB_USER}
       MARIADB_PASSWORD: ${DB_PASSWORD}
     volumes:

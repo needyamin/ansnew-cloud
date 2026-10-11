@@ -12,6 +12,14 @@ import { api, invalidate } from './api.js';
 import { state } from './state.js';
 import { icon } from './icons.js';
 import { dialog, confirmDialog, toast, toastOk, toastErr } from './ui.js';
+
+/** Bounded scroll box for wide tables (same pattern as main.js). */
+function tableWrap(table) {
+  const w = el('div', { class: 'table-wrap' });
+  w.appendChild(table);
+  return w;
+}
+
 import { ensureSensitive } from './sensitive.js';
 
 const TYPE_LABEL = {
@@ -94,7 +102,9 @@ export async function renderDrivesView(container, { onChanged }) {
     ));
   }
   table.appendChild(tbody);
-  page.appendChild(table);
+  // .table-wrap gives the table a bounded scroll box on narrow screens
+  // (matches the other admin views) instead of stretching the page.
+  page.appendChild(tableWrap(table));
   container.appendChild(page);
 }
 

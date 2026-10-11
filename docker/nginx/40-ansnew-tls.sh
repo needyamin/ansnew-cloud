@@ -41,7 +41,10 @@ SRC="$TEMPLATE"
 rm -f /etc/nginx/conf.d/default.conf
 
 # A real certificate wins, unchanged.
-if [ -s "$CERTS/tls.crt" ] && [ -s "$CERTS/tls.key" ]; then
+# -r matters as much as -s: a root-owned 0600 key on the read-only mount
+# exists but uid 101 cannot read it - falling through to the placeholder
+# keeps nginx (and the whole stack) up instead of crash-looping.
+if [ -s "$CERTS/tls.crt" ] && [ -s "$CERTS/tls.key" ] && [ -r "$CERTS/tls.key" ]; then
     cp "$SRC" "$TARGET"
     echo "[ansnew] TLS: using $CERTS/tls.crt"
     exit 0

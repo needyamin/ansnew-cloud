@@ -35,11 +35,18 @@ history, audit log, share links, TOTP two-factor, and per-drive health/capacity 
 
 ```bash
 cp .env.example .env          # then edit it (see Configuration below)
-docker compose up -d --build
+sudo install -d -o 82 -g 82 storage-root backups   # manual path only:
+                                                   # container uid 82 must own these binds
+docker compose up -d --build --force-recreate      # --force-recreate: without it an
+                                                   # unchanged image tag keeps the OLD container
 docker compose ps             # wait for all services to report "healthy"
 ```
 
 Open the URL from `APP_URL` / `HTTP_PORT` (default <http://localhost:8080>).
+
+Default bootstrap login on every deployment: **`admin` / `admin`**
+(`ADMIN_PASSWORD=admin` in `.env.example`; `install.sh` keeps it unless you pass
+`--admin-password`). Change it after first login on any public server.
 
 ---
 
@@ -47,8 +54,8 @@ Open the URL from `APP_URL` / `HTTP_PORT` (default <http://localhost:8080>).
 
 `install.sh` turns a bare server into a running stack: it installs Docker Engine
 and the Compose plugin, fetches the source, writes a production-safe `.env`
-(random admin password, real `APP_URL`, `PASSWORD_MIN_LENGTH` raised from the
-example's throwaway `5`), builds the images, waits for every service to go
+(`admin`/`admin` bootstrap credentials unless `--admin-password` is given, real
+`APP_URL`; `PASSWORD_MIN_LENGTH` adapts to the chosen password), builds the images, waits for every service to go
 healthy and prints the URL and credentials.
 
 ```bash

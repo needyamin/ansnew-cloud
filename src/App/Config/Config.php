@@ -76,6 +76,8 @@ final class Config
             'ANSNEW_DATA_DIR', 'ANSNEW_STORAGE_ROOT', 'PASSWORD_MIN_LENGTH',
             // Drive health / backup behaviour.
             'ANSNEW_SMART_ENABLED', 'ANSNEW_BACKUP_DIR',
+            // Deployment-visible build marker (BootstrapController).
+            'APP_VERSION',
         ] as $key) {
             $val = getenv($key);
             if ($val !== false) {

@@ -409,7 +409,19 @@ function bootstrapAdmin(): void
         $generated = true;
     }
 
-    UserService::create($username, $credential, 'admin', 'Administrator', $config->get('ADMIN_EMAIL', ''));
+    if ($generated) {
+        UserService::create($username, $credential, 'admin', 'Administrator', $config->get('ADMIN_EMAIL', ''));
+    } else {
+        // Operator-supplied ADMIN_PASSWORD must always win (deployment target:
+        // admin/admin on every deployment). Bypass the length policy for the
+        // bootstrap only, and say so loudly instead of silently aborting the seed.
+        try {
+            UserService::create($username, $credential, 'admin', 'Administrator', $config->get('ADMIN_EMAIL', ''), false);
+        } catch (\InvalidArgumentException $e) {
+            fwrite(STDERR, "[ansnew] WARNING: bootstrap ADMIN_PASSWORD was rejected by the password policy ({$e->getMessage()})\n");
+            throw $e;
+        }
+    }
     echo "[ansnew] admin '{$username}' created\n";
     if ($generated) {
         echo "[ansnew] random admin credential (shown once, store it now): {$credential}\n";

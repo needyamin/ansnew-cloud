@@ -24,6 +24,13 @@ COPY docker/nginx/40-ansnew-tls.sh /docker-entrypoint.d/40-ansnew-tls.sh
 RUN chmod +x /docker-entrypoint.d/40-ansnew-tls.sh
 
 COPY public/ /var/www/public/
+# Cache busting: hash the copied frontend content and stamp it into
+# index.html as the ?v= query on the asset links. Any code/CSS change ->
+# new hash -> new URLs -> browsers fetch the fresh bundle even when they
+# still hold a cached index.html; unchanged builds keep the same hash, so
+# existing caches stay valid.
+COPY docker/nginx/stamp-assets.sh /tmp/stamp-assets.sh
+RUN chmod +x /tmp/stamp-assets.sh && /tmp/stamp-assets.sh && rm -f /tmp/stamp-assets.sh
 COPY public/healthz /usr/share/nginx/html/healthz
 
 USER 101

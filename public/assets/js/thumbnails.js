@@ -18,8 +18,11 @@ export function isThumbnailable(entry) {
   return String(entry.mime || '').startsWith('image/');
 }
 
-export function thumbUrl(mount, path, size = THUMB_SIZE) {
-  return `/api/fs/${encodeURIComponent(mount)}/thumb?path=${encodeURIComponent(path)}&size=${size}`;
+export function thumbUrl(mount, path, size = THUMB_SIZE, version = 0) {
+  // `version` (the entry mtime) busts the browser cache when a file is
+  // overwritten: the server-side cache key already includes mtime, so the
+  // URL must too, otherwise the old thumbnail sticks for up to 24h.
+  return `/api/fs/${encodeURIComponent(mount)}/thumb?path=${encodeURIComponent(path)}&size=${size}&v=${version || 0}`;
 }
 
 /**

@@ -35,10 +35,12 @@ final class UserService
         );
     }
 
-    public static function create(string $username, string $password, string $role, string $displayName = '', string $email = ''): int
+    public static function create(string $username, string $password, string $role, string $displayName = '', string $email = '', bool $enforcePasswordPolicy = true): int
     {
         $username = Validator::username($username);
-        Validator::password($password);
+        if ($enforcePasswordPolicy) {
+            Validator::password($password);
+        }
         if (!in_array($role, ['admin', 'user'], true)) {
             throw new InvalidArgumentException('Invalid role');
         }

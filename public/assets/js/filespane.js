@@ -696,7 +696,7 @@ export class FilesPane {
           node._refs.img = img;
         }
         if (visual.firstChild !== img) visual.replaceChildren(img);
-        const url = thumbUrl(this.loc.mount, entry.path);
+        const url = thumbUrl(this.loc.mount, entry.path, undefined, entry.mtime);
         if (img.dataset.thumb !== url) {
           img.dataset.thumb = url;
           img.removeAttribute('src');

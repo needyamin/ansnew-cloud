@@ -17,6 +17,11 @@ printf '%s\n%s\n' "$NAS_PASS" "$NAS_PASS" | smbpasswd -a "$NAS_USER"
 # The inbox lives on the shared host bind mount (same dir the app lists as the
 # `local` mount), so dropped files show up in the file manager at once. It must be
 # owned by the forced SMB user (uid 82) or the app containers cannot read/write it.
+# Heal the WHOLE mount root, not just _inbox: on a no-installer deployment
+# Docker auto-creates the host dir root-owned, which would make every file
+# operation in the file manager fail with EACCES for uid 82 (www-data).
+# (The nas container runs as root, so this chown is allowed to succeed.)
+chown ansnew:ansnew /srv/storage/local 2>/dev/null || true
 mkdir -p /srv/storage/local/_inbox
 chown ansnew:ansnew /srv/storage/local/_inbox 2>/dev/null || true
 chmod 0775 /srv/storage/local/_inbox

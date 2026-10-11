@@ -52,7 +52,11 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   -subj "/CN=${CERT_CN:-ansnew-cloud}" \
   -addext "subjectAltName=DNS:localhost,DNS:ansnew-cloud,IP:127.0.0.1"
 
-chmod 600 "$DIR/tls.key" 2>/dev/null || true
+# The nginx container runs as uid 101 (nginx-unprivileged) and mounts this
+# directory read-only; a root-owned 0600 key would crash-loop it with
+# "cannot load certificate key ... Permission denied".
+chown root:101 "$DIR/tls.key" 2>/dev/null || true
+chmod 640 "$DIR/tls.key"
 chmod 644 "$DIR/tls.crt" 2>/dev/null || true
 echo "wrote $DIR/tls.crt and $DIR/tls.key"
 echo "now run: docker compose restart nginx"

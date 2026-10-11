@@ -52,7 +52,9 @@ certbot certonly "${ARGS[@]}"
 # Deploy into the exact filenames the nginx config reads.
 LIVE="/etc/letsencrypt/live/${DOMAIN}"
 install -m 0644 "$LIVE/fullchain.pem" "$CERTS/tls.crt"
-install -m 0600 "$LIVE/privkey.pem"   "$CERTS/tls.key"
+# Group 101 = nginx-unprivileged uid: the key must be readable inside the
+# read-only mounted certs directory or nginx cannot start.
+install -o root -g 101 -m 0640 "$LIVE/privkey.pem"   "$CERTS/tls.key"
 
 # RESTART, not reload. nginx cannot change ssl_certificate at runtime, and a
 # container that booted without a certificate has a config pointing at the

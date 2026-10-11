@@ -3,3 +3,6 @@
 # "exec /entrypoint.sh: no such file or directory".
 *.sh text eol=lf
 install.sh text eol=lf
+# Extensionless bash CLI wrapper — same CRLF shebang hazard as *.sh.
+ansnew text eol=lf
+docker/nginx/stamp-assets.sh text eol=lf

@@ -25,7 +25,7 @@ PROJECT_DIR="$(pwd)"
 # the correct certificate either way. ~1 second, once every ~60 days.
 certbot renew --quiet --deploy-hook "
   install -m 0644 \"\$RENEWED_LINEAGE/fullchain.pem\" '${CERTS}/tls.crt' &&
-  install -m 0600 \"\$RENEWED_LINEAGE/privkey.pem\"   '${CERTS}/tls.key' &&
+  install -o root -g 101 -m 0640 \"\$RENEWED_LINEAGE/privkey.pem\"   '${CERTS}/tls.key' &&
   docker compose -f '${PROJECT_DIR}/docker-compose.yml' restart nginx
 "
 

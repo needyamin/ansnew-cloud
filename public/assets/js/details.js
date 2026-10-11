@@ -56,7 +56,7 @@ export class DetailsPanel {
     const head = el('div', { class: 'details-head' });
 
     if (isThumbnailable(e)) {
-      const img = el('img', { class: 'details-thumb', alt: e.name, 'data-thumb': thumbUrl(mount, e.path, 256) });
+      const img = el('img', { class: 'details-thumb', alt: e.name, 'data-thumb': thumbUrl(mount, e.path, 256, e.mtime) });
       img.src = img.dataset.thumb;
       head.appendChild(img);
     } else {

@@ -67,11 +67,7 @@ cd /srv/ansnew-cloud
 sudo ./install.sh --domain cloud.example.com
 ```
 
-It installs Docker if needed, writes a hardened `.env` (random admin password,
-`APP_URL=https://<domain>`, `SESSION_SECURE_COOKIE=true`, ports 80/443,
-`PASSWORD_MIN_LENGTH=10`), opens the firewall, builds and starts the stack, waits
-for health, and writes the generated credentials to
-`/root/ANSNEW-CREDENTIALS.txt`. Use `--tls` to also run the certificate step.
+It installs Docker if needed, writes a production `.env` (admin/admin bootstrap credentials unless `--admin-password` is given, `APP_URL=https://<domain>`, `SESSION_SECURE_COOKIE=true`, ports 80/443, `PASSWORD_MIN_LENGTH` adapted to the chosen password), opens the firewall, builds and starts the stack, waits for health, and writes the credentials to `/root/ANSNEW-CREDENTIALS.txt`. Use `--tls` to also run the certificate step.
 
 ### Option B — manual
 
@@ -87,8 +83,8 @@ APP_URL=https://cloud.example.com
 SESSION_SECURE_COOKIE=true
 HTTP_PORT=80
 HTTPS_PORT=443
-ADMIN_PASSWORD=            # leave empty -> a strong one is generated and logged
-PASSWORD_MIN_LENGTH=10
+ADMIN_PASSWORD=admin                # CHANGE on a public server (or --admin-password)
+PASSWORD_MIN_LENGTH=5               # adapt to the password you actually set
 CERTS_HOST_PATH=/etc/ansnew/tls
 ACME_WEBROOT_HOST_PATH=/var/www/ansnew-acme
 TRUST_PROXY=true

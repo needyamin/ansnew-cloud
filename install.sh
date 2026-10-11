@@ -15,7 +15,8 @@
 #    1. installs Docker Engine + the Compose v2 plugin (if missing)
 #    2. gets the source (this checkout, or clones into --dir)
 #    3. writes a production-safe .env from .env.example (random admin password,
-#       real APP_URL, PASSWORD_MIN_LENGTH raised from the example's throwaway 5)
+#       real APP_URL; the bootstrap admin is admin/admin unless --admin-password
+#       is given; PASSWORD_MIN_LENGTH adapts to the chosen password)
 #    4. builds the images and starts the stack
 #    5. waits for every service to be healthy, then smoke-tests HTTP
 #    6. prints the URL and the admin credentials
@@ -356,20 +357,20 @@ setup_env() {
         if [[ -t 0 ]]; then
             local pw1 pw2
             while true; do
-                read -rsp "Admin password (min 10 chars, blank = generate): " pw1; printf '\n'
-                if [[ -z $pw1 ]]; then ADMIN_PASSWORD="$(gen_pass)"; break; fi
-                if (( ${#pw1} < 10 )); then warn "too short"; continue; fi
+                read -rsp "Admin password (blank = 'admin'): " pw1; printf '\n'
+                if [[ -z $pw1 ]]; then ADMIN_PASSWORD="admin"; break; fi
+                if (( ${#pw1} < 5 )); then warn "too short (min 5)"; continue; fi
                 read -rsp "Repeat password: " pw2; printf '\n'
                 [[ $pw1 == "$pw2" ]] || { warn "mismatch"; continue; }
                 ADMIN_PASSWORD="$pw1"; break
             done
         else
-            ADMIN_PASSWORD="$(gen_pass)"
+            ADMIN_PASSWORD="admin"
         fi
     fi
 
-    # The shipped example allows 5-char passwords so a throwaway local
-    # "admin/admin" works. On a real server that is not acceptable.
+    # admin/admin is the default bootstrap credential on every deployment;
+    # PASSWORD_MIN_LENGTH adapts to the chosen password so the seed succeeds.
     local min_len=10
     (( ${#ADMIN_PASSWORD} < min_len )) && { min_len=${#ADMIN_PASSWORD}; warn "password is shorter than 10 characters"; }
 
@@ -418,6 +419,16 @@ setup_env() {
     chown -R 82:82 "$STORAGE_DIR" 2>/dev/null \
         || { chmod -R 0777 "$STORAGE_DIR"; warn "could not chown $STORAGE_DIR to uid 82 — fell back to 0777"; }
     ok "storage root: $STORAGE_DIR"
+
+    # The backups bind (${BACKUP_HOST_PATH:-./backups} -> /backups) is written
+    # by the php container as uid 82; a root-owned auto-created directory
+    # would make the first `ansnew:backup` fail with EACCES.
+    local bdir; bdir="$(grep -sE '^BACKUP_HOST_PATH=' "$envf" | cut -d= -f2- | tr -d '"')"
+    bdir="${bdir:-$APP_DIR/backups}"
+    mkdir -p "$bdir"
+    chown 82:82 "$bdir" 2>/dev/null \
+        || { chmod 0777 "$bdir"; warn "could not chown $bdir to uid 82 - fell back to 0777"; }
+    ok "backups dir: $bdir"
 
     # Defensive: a fresh clone has no files under ws-server/lib, but the ws
     # image COPYs that directory, so make sure it exists before building.

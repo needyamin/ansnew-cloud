@@ -23,7 +23,9 @@ final class BootstrapController
             'authenticated' => $user !== null,
             'user' => $user?->publicInfo(),
             'csrf' => $session->csrfToken(),
-            'version' => '1.0.0',
+            // Deployment-visible build marker: set APP_VERSION in .env per
+            // release so 'did the update actually land?' is answerable.
+            'version' => \App\Config\Config::i()->get('APP_VERSION', '1.0.0'),
             // Published so the Settings page can show the real policy rather
             // than guessing. Nothing here is secret; it is all server posture.
             'idleTimeout' => $cfg->getInt('IDLE_TIMEOUT', 1800),

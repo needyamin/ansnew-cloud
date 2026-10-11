@@ -126,6 +126,11 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .sidebar.collapsed .side-sec-row .link-btn { display: none; }
 
 /* Drives / connections forms: two fields per row where there is space. */
+/* `hidden` must ALWAYS win over component display rules: without this,
+   .field-grid{display:grid} overrode [hidden] and the Add-drive dialog
+   showed the S3 cloud fields even when "Local storage" was selected —
+   the storage create section rendered as a broken half-cloud card. */
+[hidden] { display: none !important; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
 .field-grid .field { min-width: 0; }
 .field-grid .checkbox, .field-grid p { grid-column: 1 / -1; }
@@ -237,11 +242,16 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .fitem .thumb.thumb-failed { display: none; }
 
 /* ---------- details panel ---------- */
-.details {
+/*aside.details = the right-hand metadata PANEL. Scoped to the element on
+  purpose: the file-list view mode also carries a `details` class token
+  (div.filelist.details), and an unscoped .details{width:300px} matched it
+  too — squeezing the list to 300px, collapsing the name column to 0px
+  (filenames vanished) and rendering the storage pane as a narrow card. */
+aside.details {
   width: 300px; flex-shrink: 0; border-left: 1px solid var(--border);
   background: var(--bg2); display: flex; flex-direction: column; overflow-y: auto;
 }
-.details[hidden] { display: none; }
+aside.details[hidden] { display: none; }
 .details-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 .details-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 10px; text-align: center; font-size: 13px; }
 .details-empty .ico { width: 28px; height: 28px; opacity: .6; }
@@ -407,9 +417,27 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 900; display: grid; place-items: center; padding: 16px; overflow: auto; }
 /* min-width must never exceed the viewport: `min(380px, 100%)` keeps the old
    comfortable width on desktop while still fitting a 320px phone. */
-.dialog { background: var(--panel); border: 1px solid var(--border2); border-radius: 12px; box-shadow: var(--shadow); width: fit-content; min-width: min(380px, 100%); max-width: min(640px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
+.dialog { background: var(--panel); border: 1px solid var(--border2); border-radius: 12px; box-shadow: var(--shadow); width: min(560px, 92vw); min-width: min(380px, 100%); max-width: min(640px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
 .dialog > header { padding: 14px 18px 8px; font-weight: 600; font-size: 15px; }
 .dialog > .body { padding: 4px 18px 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+/* Form controls inside dialogs must fill the card: .dialog is sized by
+   width (not fit-content), but bare inputs still default to ~180px and
+   made the create/mount/connection cards look half-width. */
+/* Every form control inside a dialog fills the card: the create/mount/
+   connection/user cards must never render half-width. Deep selectors on
+   purpose — fields may sit directly in .body or inside .field-grid. */
+.dialog .body input[type=text],
+.dialog .body input[type=password],
+.dialog .body input[type=number],
+.dialog .body input[type=search],
+.dialog .body input[type=email],
+.dialog .body select,
+.dialog .body textarea,
+.dialog .body label.field,
+.dialog .body .field,
+.dialog .body .field-grid,
+.dialog .body .settings-card { width: 100%; box-sizing: border-box; }
+.dialog .body .field-grid .checkbox { width: 100%; }
 .dialog > footer { padding: 10px 18px 14px; display: flex; justify-content: flex-end; gap: 8px; }
 
 .toasts { position: fixed; right: 14px; bottom: 14px; z-index: 1200; display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
@@ -628,7 +656,7 @@ svg.icon {
   .chip { min-height: 44px; padding: 4px 14px; }   /* touch target */
   .ext-select { min-height: 44px; max-width: 140px; }
   .filterbar .btn.sm { min-height: 44px; }
-  .details { display: none; }                   /* shown as a sheet instead */
+  aside.details { display: none; }              /* panel shown as a sheet instead */
   .jobdrawer { width: 100vw; }
   body.jobdrawer-open .uploadtray { right: 14px; }
   .uploadtray { width: calc(100vw - 28px); }
