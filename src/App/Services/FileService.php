@@ -533,14 +533,14 @@ final class FileService
         // 2. create directory skeleton (paths relative to the transfer root)
         $createdDirs = [$src => $target];
         foreach ($dirs as $dir) {
-            $rel = self::relInside($src, $dir);
+            $rel = self::relInside($src, $dir['path']);
             $dstPath = PathGuard::join($target, $rel);
             if (!$dstAdapter->exists($dstPath)) {
                 $dstAdapter->mkdir($dstPath, true);
             }
-            $createdDirs[$dir] = $dstPath;
+            $createdDirs[$dir['path']] = $dstPath;
             $done++;
-            $progress($done, max(1, $total), PathGuard::basename($dir));
+            $progress($done, max(1, $total), PathGuard::basename($dir['path']));
         }
 
         // 3. copy files
