@@ -93,6 +93,8 @@ final class Routes
         // ---- usage ----
         $r->get('/api/usage', fn($req) => UsageController::usage($req, $session));
         $r->post('/api/usage/{mount}/scan', fn($req, $m) => UsageController::scan($req, $session, $m));
+        // Filesystem capacity (total/used/free) for local mounts.
+        $r->get('/api/drives/info', fn($req) => DrivesController::info($req, $session));
 
         // ---- admin ----
         $r->get('/api/admin/users', fn($req) => AdminUserController::list($req, $session));

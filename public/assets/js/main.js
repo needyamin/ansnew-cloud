@@ -247,8 +247,9 @@ function startApp() {
   // user can open the downloads tray before any navigation happens.
   initDownloads();
   // Usage feeds the sidebar's per-drive size line; repaint once it lands,
-  // since the shell is built from the mounts alone.
-  loadUsage().finally(repaintSidebar);
+  // since the shell is built from the mounts alone. Filesystem capacity
+  // (total/used/free) is fetched alongside it.
+  Promise.allSettled([loadUsage(), loadDriveInfo()]).finally(repaintSidebar);
   // Mounts/favorites/recent must exist before the sidebar can render, so load
   // them first and only then build the shell.
   refreshSidebarData().finally(() => {
@@ -328,6 +329,17 @@ async function loadUsage() {
   return state.usageInfo || [];
 }
 
+/** Load per-drive filesystem capacity (total/used/free) for the sidebar. */
+async function loadDriveInfo() {
+  try {
+    const r = await api.get('/api/drives/info');
+    state.drivesInfo = r.drives || [];
+  } catch (_) {
+    /* capacity stays unknown; scan-based figures still show */
+  }
+  return state.drivesInfo || [];
+}
+
 /** Repaint the sidebar if the shell exists yet (no-op during boot). */
 function repaintSidebar() {
   if (shellNodes.sidebar && typeof shellNodes.sidebar.render === 'function') {
@@ -356,7 +368,7 @@ function driveInfoFor(mountName) {
 function driveUsageParts(mountName) {
   const cap = (driveInfoFor(mountName) || {}).capacity || {};
   if (cap.available && typeof cap.used === 'number') {
-    return { used: cap.used, total: cap.total, pct: cap.percent, kind: 'filesystem' };
+    return { used: cap.used, total: cap.total, free: cap.free, pct: cap.percent, kind: 'filesystem' };
   }
   // /api/usage returns the raw scan result ({used,files,dirs,scannedAt}) with no
   // `available` flag — unlike /api/drives/info, which wraps it. Treat a numeric
@@ -506,7 +518,7 @@ function buildSidebar() {
       const btn = el('button', {
         class: 'side-item' + (active ? ' active' : ''),
         title: parts
-          ? `${m.label}\n${usageLabel(parts)}${parts.kind === 'filesystem' ? ' (whole filesystem)' : ''}`
+          ? `${m.label}\n${usageLabel(parts)}${parts.kind === 'filesystem' && typeof parts.free === 'number' ? ' · ' + fmtSize(parts.free) + ' free' : ''}${parts.kind === 'filesystem' ? ' (whole filesystem)' : ''}`
           : `${m.label}\nUsage not scanned yet`,
       },
         icon('drive', 'ico'),
@@ -906,21 +918,27 @@ function showView(name) {
 async function renderThisPc(c) {
   const page = el('div', { class: 'admin-page' }, el('h2', {}, 'This PC'));
   page.appendChild(el('p', { class: 'muted', text:
-    'Every drive available to your account. Local drives use the host filesystem; ' +
-    'remote drives (S3 / R2, added later from Connections) show their own scanned usage.' }));
+    'Every drive available to your account. Local drives report the host filesystem\u2019s ' +
+    'total / used / available; remote drives (S3 / R2, added later from Connections) show ' +
+    'their own scanned usage.' }));
 
-  await loadUsage();
+  await Promise.allSettled([loadDriveInfo(), loadUsage()]);
   const table = el('table', { class: 'table' },
     el('thead', {}, el('tr', {},
-      el('th', {}, 'Drive'), el('th', {}, 'Type'), el('th', {}, 'Usage'), el('th', { class: 'actions' }, 'Actions'))),
+      el('th', {}, 'Drive'), el('th', {}, 'Type'),
+      el('th', {}, 'Used'), el('th', {}, 'Available'), el('th', {}, 'Total'),
+      el('th', { class: 'actions' }, 'Actions'))),
   );
   const tbody = el('tbody');
   for (const m of state.mounts) {
     const parts = driveUsageParts(m.name);
+    const isFs = !!parts && parts.kind === 'filesystem';
     const tr = el('tr', {},
       el('td', {}, icon('drive', 'ico'), el('span', { class: 'drive-name', text: m.label || m.name })),
       el('td', {}, el('span', { class: 'badge', text: m.adapter === 's3' ? 'S3 / R2' : 'Local' })),
-      el('td', { class: 'muted', text: usageLabel(parts) }),
+      el('td', { class: 'muted', text: parts ? fmtSize(parts.used) : '\u2014' }),
+      el('td', { class: 'muted', text: isFs && typeof parts.free === 'number' ? fmtSize(parts.free) : '\u2014' }),
+      el('td', { class: 'muted', text: parts && parts.total ? fmtSize(parts.total) : '\u2014' }),
     );
     const actions = el('td', { class: 'actions' });
     const open = el('button', { class: 'btn' }, 'Open');
