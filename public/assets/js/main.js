@@ -16,6 +16,7 @@ import { loadSprite, icon } from './icons.js';
 import { toast, toastOk, toastErr, toastWarn, dialog, confirmDialog, promptDialog } from './ui.js';
 import { FilesPane } from './filespane.js';
 import { isTextEntry } from './editor.js';
+import { hasRichPreview } from './preview.js';
 import { DetailsPanel } from './details.js';
 import { initJobs, openJobs, closeJobs } from './jobs.js';
 import {
@@ -1179,9 +1180,12 @@ function entryMenu(e, entry, inst) {
 
   const items = [];
   if (!many) {
-    // Text/code files open in the built-in editor, so the label says so.
-    const openLabel = entry.type === 'dir' ? 'Open' : (isTextEntry(entry) ? 'Edit' : 'Preview');
-    items.push({ label: openLabel, icon: isTextEntry(entry) && entry.type !== 'dir' ? 'edit' : 'folder', onClick: () => inst.open(entry) });
+    // Text/code files open in the built-in editor, so the label says so — but
+    // Markdown/office files get a rendered preview instead, so those say
+    // "Preview".
+    const editHere = isTextEntry(entry) && !hasRichPreview(entry);
+    const openLabel = entry.type === 'dir' ? 'Open' : (editHere ? 'Edit' : 'Preview');
+    items.push({ label: openLabel, icon: entry.type === 'dir' ? 'folder' : (editHere ? 'edit' : 'file'), onClick: () => inst.open(entry) });
     if (entry.type !== 'dir') {
       items.push({
         label: 'Download', icon: 'download',

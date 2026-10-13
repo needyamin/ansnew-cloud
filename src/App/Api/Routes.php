@@ -42,6 +42,7 @@ final class Routes
         // Any mix of files and folders -> one zip, prepared by the worker.
         $r->post('/api/fs/{mount}/download-selection', fn($req, $m) => FsController::downloadSelection($req, $session, $m));
         $r->get('/api/fs/{mount}/preview', fn($req, $m) => FsController::preview($req, $session, $m));
+        $r->get('/api/fs/{mount}/render', fn($req, $m) => FsController::render($req, $session, $m));
         $r->get('/api/fs/{mount}/stat', fn($req, $m) => FsController::stat($req, $session, $m));
         // Text files open in the built-in code editor: read the contents, then
         // save them back (with a hash guard against clobbering a concurrent edit).

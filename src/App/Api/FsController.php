@@ -10,6 +10,7 @@ use App\Core\Request;
 use App\Core\Response;
 use App\Services\JobService;
 use App\Services\DownloadService;
+use App\Services\DocumentPreviewService;
 use App\Services\FavoritesService;
 use App\Services\FileService;
 use App\Storage\StorageManager;
@@ -516,6 +517,38 @@ final class FsController
         $resp->withHeader('Cache-Control', 'private, max-age=60');
         self::withRangeHeaders($resp, $r);
         return $resp->withStream($r['stream'], $r['length']);
+    }
+
+    /**
+     * Render an office document (.docx/.odt/.rtf) to a safe HTML subset for the
+     * in-app preview. Returns JSON rather than bytes so the SPA can drop the
+     * markup straight into the viewer; the bytes themselves stay behind the
+     * normal adapter/decryption path.
+     */
+    public static function render(Request $req, SessionManager $session, string $mount): Response
+    {
+        $user = Guard::requireUser($session);
+        $path = (string) $req->query('path', '');
+        [, $adapter, $norm] = StorageManager::resolve($user, Validator::mountName($mount), $path);
+        $stat = $adapter->stat($norm);
+        if (($stat['type'] ?? '') !== 'file') {
+            return Response::error('Not a file', 400, 'bad_request');
+        }
+
+        $name = (string) ($stat['name'] ?? '');
+        $ext = strtolower((string) pathinfo($name, PATHINFO_EXTENSION));
+        if (!DocumentPreviewService::supports($ext)) {
+            return Response::error('No document preview for this file type', 415, 'unsupported');
+        }
+
+        // Rendering means decompressing the whole document in memory; cap it.
+        if ((int) ($stat['size'] ?? 0) > 40 * 1024 * 1024) {
+            return Response::error('Document is too large to preview', 413, 'too_large');
+        }
+
+        FavoritesService::recordRecent($user, $mount, $norm, $name, 'preview');
+        $result = DocumentPreviewService::render($adapter, $norm, $ext);
+        return Response::ok($result + ['name' => $name, 'extension' => $ext]);
     }
 
     /**
