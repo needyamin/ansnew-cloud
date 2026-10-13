@@ -12,7 +12,7 @@ DATA_DIR=/var/www/data
 mkdir -p "$DATA_DIR" "$DATA_DIR/sessions" "$DATA_DIR/tmp" "$DATA_DIR/trash" \
          "$DATA_DIR/logs" "$DATA_DIR/keys" "$DATA_DIR/db" /srv/storage/local 2>/dev/null || true
 
-# First boot: generate app key + WS secret if not provided by env.
+# First boot: generate app key if not provided by env.
 if [ ! -f "$DATA_DIR/keys/app.key" ]; then
     if [ -n "$APP_KEY" ]; then
         printf '%s' "$APP_KEY" > "$DATA_DIR/keys/app.key"
@@ -21,14 +21,6 @@ if [ ! -f "$DATA_DIR/keys/app.key" ]; then
         echo "[ansnew] generated new APP_KEY at $DATA_DIR/keys/app.key"
     fi
 fi
-if [ -z "$WS_SECRET" ] && [ ! -f "$DATA_DIR/keys/ws.secret" ]; then
-    php -r 'echo bin2hex(random_bytes(32));' > "$DATA_DIR/keys/ws.secret"
-    echo "[ansnew] generated new WS_SECRET at $DATA_DIR/keys/ws.secret"
-fi
-# The ws container (node, UID 82) shares this read-only data volume and must be
-# able to read the secret. The volume is never exposed beyond the app containers
-# (nginx blocks /data/), so group/world read inside it is acceptable.
-chmod 0644 "$DATA_DIR/keys/ws.secret" 2>/dev/null || true
 
 # Migrations + admin bootstrap + default mount seeding (all idempotent).
 php /var/www/app/bin/console.php ansnew:migrate || echo "[ansnew] migration deferred"

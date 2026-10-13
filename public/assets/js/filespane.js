@@ -31,7 +31,6 @@ import { preview } from './preview.js';
 import { runUploadsWithUI } from './uploadtray.js';
 import { toastErr, toastOk } from './ui.js';
 import { onLongPress } from './gestures.js';
-import { isThumbnailable, thumbUrl, createThumbObserver, onThumbError } from './thumbnails.js';
 import { FilterBar, matches } from './filters.js';
 
 const DRAG_MIME = 'application/x-ansnew';
@@ -111,7 +110,6 @@ export class FilesPane {
     this.dragging = false;
     this.dropTargetNode = null;
     this.pendingRevalidate = false;
-    this.thumbs = createThumbObserver();
 
     this.onNavigate = null;      // callback(loc)
     this.onSelection = null;
@@ -688,27 +686,8 @@ export class FilesPane {
     if (tile) {
       const { visual, ico, nm } = node._refs;
       nm.textContent = entry.name;
-      if (isThumbnailable(entry)) {
-        let img = node._refs.img;
-        if (!img) {
-          img = el('img', { class: 'thumb', alt: '', loading: 'lazy', draggable: 'false' });
-          onThumbError(img);
-          node._refs.img = img;
-        }
-        if (visual.firstChild !== img) visual.replaceChildren(img);
-        const url = thumbUrl(this.loc.mount, entry.path, undefined, entry.mtime);
-        if (img.dataset.thumb !== url) {
-          img.dataset.thumb = url;
-          img.removeAttribute('src');
-          img.classList.remove('thumb-failed');
-        }
-        this.thumbs.watch(img);
-        node._thumbImg = img;
-      } else {
-        if (node._thumbImg) { this.thumbs.unwatch(node._thumbImg); node._thumbImg = null; }
-        if (visual.firstChild !== ico) visual.replaceChildren(ico);
-        setIcon(ico, iconFor(entry));
-      }
+      if (visual.firstChild !== ico) visual.replaceChildren(ico);
+      setIcon(ico, iconFor(entry));
       return;
     }
 
@@ -733,7 +712,6 @@ export class FilesPane {
 
   /** Return a node to the pool. Must strip everything fill() sets. */
   releaseNode(node) {
-    if (node._thumbImg) { this.thumbs.unwatch(node._thumbImg); node._thumbImg = null; }
     node.classList.remove('selected', 'drop-target', 'dragging', 'pending', 'failed');
     node.removeAttribute('data-path');
     node.removeAttribute('data-dir');
@@ -1511,7 +1489,6 @@ export class FilesPane {
     if (this.mq) this.endMarquee();          // also unbinds the window listeners
     if (this.mqSuppressTimer) { clearTimeout(this.mqSuppressTimer); this.mqSuppressTimer = 0; }
     if (this.ro) { this.ro.disconnect(); this.ro = null; }
-    if (this.thumbs) { this.thumbs.disconnect(); }
     if (this.scrollRaf) { cancelAnimationFrame(this.scrollRaf); this.scrollRaf = 0; }
     if (this.typeTimer) { clearTimeout(this.typeTimer); this.typeTimer = null; }
     clearTimeout(this._revalidateTimer);

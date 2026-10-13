@@ -9,13 +9,11 @@ use App\Auth\SessionManager;
 use App\Core\Database;
 use App\Core\Request;
 use App\Core\Response;
-use App\Services\AuditService;
-use App\Support\PathGuard;
 use App\Support\Validator;
 use RuntimeException;
 
 /**
- * Admin: mount management (local + remote mounts, per-user grants).
+ * Admin: mount management (local mounts only, per-user grants).
  */
 final class AdminMountController
 {
@@ -70,7 +68,6 @@ final class AdminMountController
             ]
         );
         $id = (int) $db->scalar('SELECT id FROM mounts WHERE name = :n', [':n' => $name]);
-        AuditService::log($admin, 'admin.mount_create', $name, null, null, 'ok', $adapter, $req->ip(), $req->userAgent());
         return Response::ok(['id' => $id]);
     }
 
@@ -127,7 +124,6 @@ final class AdminMountController
             default:
                 return Response::error('Unknown action', 400, 'bad_request');
         }
-        AuditService::log($admin, 'admin.mount_update', null, null, (string) $id, 'ok', $action, $req->ip(), $req->userAgent());
         return Response::ok(['updated' => true]);
     }
 
@@ -136,7 +132,6 @@ final class AdminMountController
         $admin = Guard::requireAdmin($session);
         $db = Database::i();
         $db->run('DELETE FROM mounts WHERE id = :id', [':id' => $id]);
-        AuditService::log($admin, 'admin.mount_delete', null, null, (string) $id, 'ok', '', $req->ip(), $req->userAgent());
         return Response::ok(['deleted' => true]);
     }
 }

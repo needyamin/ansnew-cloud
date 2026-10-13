@@ -1,267 +1,239 @@
 # ANSNEW CLOUD — Architecture
 
-ANSNEW CLOUD is a self-hosted, desktop-style web file manager. PHP 8.2 backend, dependency-free
-ES-module frontend, WebSocket layer on Node.js, fully Dockerized.
+ANSNEW CLOUD is a self-hosted, desktop-style web file manager with encryption at rest.
+PHP 8.2 backend with **zero package dependencies** (its own PSR-4 autoloader), dependency-free
+ES-module frontend, fully Dockerized. Local storage (encrypted at rest) plus optional
+S3-compatible remote drives; SQLite only.
 
 ## 1. High-level topology
 
 ```
                 ┌────────────────────────────────────────────────┐
                 │                  docker network                 │
-                │                                                │
  browser ───────┤  nginx (unprivileged, :8080)                   │
   (SPA)         │   ├─ /            → static SPA (public/)       │
                 │   ├─ /api/*       → php-fpm:9000 (FastCGI)     │
-                │   ├─ /ws          → ws:3001 (upgrade)          │
+                │   ├─ /s/{token}   → php-fpm (public shares)   │
                 │   └─ /healthz     → static 200                 │
                 │                                                │
                 │  php-fpm (app)      worker (job runner, CLI)   │
-                │  ws (Node, ws+ssh2) mariadb (optional profile) │
                 └────────────────────────────────────────────────┘
                         │                        │
-                 volumes: ansnew_data      local/remote FS
-                 (sqlite, sessions,        via StorageAdapters:
-                  trash, logs, app key)    local, FTP, FTPS, SFTP,
-                                           SMB, HTTP/WebDAV
+                 volumes: ansnew_data      local filesystem
+                 (sqlite, sessions,        (AES-256-GCM
+                  trash, logs, keys)        encrypted at rest)
 ```
 
-- **nginx** (nginxinc/nginx-unprivileged:alpine) serves the SPA and proxies to PHP and WS.
+- **nginx** serves the SPA and proxies `/api` and `/s/` to php-fpm. Three listeners: the app
+  port (published for local use), public HTTP (ACME + redirect), public HTTPS (TLS).
 - **php-fpm** runs the REST API. Sessions are PHP-native files on a persistent volume.
 - **worker** is the same PHP image running `bin/worker.php`: a polling job runner for
-  long-running operations (archive, extract, bulk copy/move/delete, folder download prep,
-  usage scans). Progress is written to the `jobs` table and pushed to the WS server.
-- **ws** (Node 20, `ws` + `ssh2`) handles browser WebSockets: authentication via
-  short-lived signed tickets, job progress fan-out, notifications, and the optional SSH
-  web terminal.
-- **nas** (optional, `--profile nas`) is a small Samba server (Alpine + `samba`) that
-  exposes `<STORAGE_HOST_PATH>/_inbox` as a writable SMB share on TCP 445, so Windows
-  "Map Network Drive" and mobile SMB apps can drop files into the file manager. Files
-  land in the same host bind mount the `local` mount reads, so they appear immediately.
-- **nas-watch** (optional, `--profile nas`) reuses the php image and runs
-  `bin/nas-watch.php`: it polls `_inbox`, and for each stable (fully-copied) file
-  encrypts it in place when `ANSNEW_ENCRYPT_LOCAL=1`, then records it in `nas_inbox`
-  and audits it. Aggregate import throughput is capped at `NAS_INGEST_MBPS` (default 50
-  MB/s) so a bulk drop can't saturate disk.
-- **mariadb** is optional (`--profile mysql`); default database is SQLite (WAL mode) to
-  keep self-hosting one-command simple.
+  long-running operations (archive, extract, bulk copy/move/delete, download-selection ZIP
+  packing, usage scans) plus hourly sweeps of plaintext temp data. Progress lives in the
+  `jobs` table; the SPA polls it.
 
 ## 2. Repository layout
 
 ```
 ansnew/
-├── docker-compose.yml          # nginx + php + worker + ws (+ optional mariadb)
+├── docker-compose.yml          # nginx + php + worker
 ├── .env.example                # all configuration via environment variables
-├── composer.json               # only runtime dep: phpseclib/phpseclib (SFTP/SSH)
 ├── docker/
-│   ├── php/Dockerfile          # php:8.2-fpm-alpine + ext + composer + non-root
+│   ├── php/Dockerfile          # php:8.2-fpm-alpine + extensions, non-root, no composer
 │   ├── php/php.ini             # hardened production PHP settings
 │   ├── php/entrypoint.sh       # key gen, migrations, admin bootstrap
-│   ├── nginx/Dockerfile        # nginx-unprivileged + site config
-│   ├── nginx/default.conf
-│   └── ws/Dockerfile           # node:20-alpine, non-root, ws + ssh2
+│   └── nginx/                  # nginx-unprivileged + site config
 ├── public/                     # web root (nginx root)
-│   ├── index.php               # sole PHP entry point (front controller)
+│   ├── index.php               # sole PHP entry point + built-in autoloader
 │   ├── healthz                 # static health file
 │   └── assets/
-│       ├── css/app.css         # design system + themes (dark/light)
+│       ├── css/app.css         # design system (single light theme)
 │       ├── js/                 # ES-module SPA, no build step
 │       └── icons.svg           # inline sprite
 ├── src/App/                    # PSR-4: App\
-│   ├── Core/                   # Kernel, Router, Request, Response, Container-ish registry
-│   ├── Http/Middleware/        # Auth, Csrf, RateLimit, Rbac
-│   ├── Auth/                   # SessionManager, Passwords, BruteForceGuard, Tickets
-│   ├── Config/                 # Env config loader
-│   ├── Storage/                # StorageManager, MountResolver, adapters/*
-│   ├── Services/               # FileService, ArchiveService, JobService, SearchService,
-│   │                           # TrashService, AuditService, UsageService, UserService,
-│   │                           # ConnectionService, MountService, UploadService
-│   ├── Jobs/                   # job handlers (archive, extract, copy, move, delete, usage)
-│   ├── Support/                # Crypto (AES-256-GCM), PathGuard, Validator, Fs helper
-│   └── Api/                    # thin controllers per resource
-├── ws-server/                  # Node WS server (auth tickets, fan-out, SSH terminal)
-├── database/schema.sql         # portable DDL (SQLite + MariaDB)
-├── bin/worker.php              # CLI job runner
+│   ├── Core/                   # Kernel, Router, Request, Response, Database, RateLimiter
+│   ├── Auth/                   # SessionManager, Guard, Policy, BruteForceGuard, Tickets
+│   ├── Config/                 # env whitelist loader
+│   ├── Storage/                # StorageManager, Mount, LocalAdapter, Encryption/*
+│   ├── Services/               # FileService, UploadService, JobService, ArchiveService,
+│   │                           # DownloadService, ShareService, TrashService, UsageService,
+│   │                           # UserService, FavoritesService, EncryptionMigrationService
+│   ├── Jobs/                   # worker + handlers (archive, extract, copy, move, delete,
+│   │                           # du, download-selection)
+│   ├── Support/                # Crypto (AES-256-GCM), PathGuard, Validator, HttpRange,
+│   │                           # ZipStreamWriter
+│   └── Api/                    # thin controllers + the route table
+├── database/schema.sqlite.sql  # the only schema
+├── bin/                        # console.php (CLI) + worker.php (job runner)
 ├── data/                       # runtime volume (never served): db, sessions, trash, logs, keys
-└── docs/                       # ARCHITECTURE.md, API.md, SECURITY.md
+├── tools/                      # static checks + API smoke tests
+└── docs/                       # ARCHITECTURE.md, DEPLOY.md
 ```
 
-## 3. Database schema (summary — full DDL in `database/schema.sql`)
+## 3. Database schema (summary — full DDL in `database/schema.sqlite.sql`)
 
 | table | purpose |
 |---|---|
-| `users` | id, username (unique), password_hash, role (`admin`\|`user`), display_name, theme, home_mount_id, is_active, created_at, last_login_at |
-| `login_attempts` | per-username+IP failure tracking for brute-force lockout |
-| `mounts` | id, name (unique), adapter (`local`\|`ftp`\|`ftps`\|`sftp`\|`smb`\|`http`), local_root (for local), connection_id (remote), remote_path, quota_bytes, is_readonly, is_visible_all, created_by |
+| `users` | username (unique), password_hash (bcrypt cost 12), role (`admin`/`user`), is_active, must_change_pw |
+| `login_attempts` | per-username+IP (and per-username) failure tracking for brute-force lockout |
+| `mounts` | name (unique), label, adapter (`local`\|`s3`), local_root, connection_id (remote), remote_path, quota_bytes, is_readonly, is_visible_all, trash_enabled, owner_user_id |
+| `connections` | saved S3-compatible endpoints: host, port, access-key id, `secret_enc` (AES-256-GCM), `extra` (bucket/region/path-style) |
 | `mount_grants` | per-user grants when `is_visible_all = 0` |
-| `connections` | saved remote connections: protocol, host, port, username, auth_type (`password`\|`key`), `secret_enc` (AES-256-GCM), fingerprint, created_by. Plaintext secrets never stored |
-| `jobs` | id (uuid), user_id, type, status (`queued`\|`running`\|`done`\|`error`\|`canceled`), params (json), progress 0–100, message, result (json), attempts, max_attempts, lease_expires_at, next_attempt_at, timestamps |
+| `jobs` | id (uuid), user_id, type, status, params (json), progress 0–100, message, result (json), attempts, max_attempts, lease_expires_at, next_attempt_at |
 | `favorites` | user bookmarks: mount + path + label |
 | `recent_files` | rolling per-user history of opened/downloaded entries |
-| `audit_log` | id, user_id, action, mount, path, target, detail (json), ip, created_at |
-| `trash_items` | original mount/path, trash location, deleted_at, deleted_by (local-adapter trash) |
-| `ws_tickets` | one-time WS auth tickets, expiring |
+| `shares` | token_hash (sha256), token_enc (AES-GCM), password_hash, expires_at, allow_download, revoked_at, access_count |
+| `trash_items` | original mount/path, trash location, deleted_at, deleted_by |
+| `rate_limits` | token-bucket state per user-or-IP |
+| `settings` | KV: encrypted one-shot download tokens, share access grants |
+| `schema_migrations` | applied migration versions |
 
 ## 4. Authentication & authorization flow
 
-1. `GET /api/bootstrap` — establishes session, returns CSRF token, login state, i18n-ish labels, theme.
-2. `POST /api/auth/login` — validates CSRF, checks `login_attempts` lockout (5 fails → exponential backoff), verifies `password_verify`, rotates session ID, regenerates CSRF token, writes audit + `last_login_at`.
-3. **Sensitive-action re-authentication (`SensitiveGate`).** A logged-in session proves identity, not intent. Destructive operations — drive disconnect, connection delete, permanent or trash delete (`fs.delete`), trash empty, clearing all favourites (`favorites.clear`), and revoking all share links (`shares.clear`) — require the account password again. The client calls `POST /api/auth/confirm` with the scope; the server verifies the password (and 2FA if enabled), runs it through the brute-force guard, and mints a short-lived grant (default 60 s, configurable `SENSITIVE_GRANT_TTL`) stored **in the PHP session**, not the browser. Each gated controller calls `SensitiveGate::guard($session, $scope, $permanent)` first; on a missing/expired grant it returns `403 sensitive_required` (a distinct code, so the client can prompt for the password rather than treating it as a denial). Because the grant lives server-side it cannot be forged or skipped by the client. `fs.delete` is conditionally gated by the `security.gate.delete_trash` setting (default on); permanent deletes are always gated. An admin toggle (`POST /api/admin/security/gate`) flips that setting; the effective posture is published in `GET /api/bootstrap` under `sensitive`.
-3. Every API call: `AuthMiddleware` (active session, active user) → `RateLimitMiddleware` (token bucket per user+IP in sqlite) → `RbacMiddleware` (route-declared role) → `CsrfMiddleware` (`X-CSRF-Token` header must match session token for every non-GET).
-4. Session hardening: `session.cookie_httponly=1`, `SameSite=Strict`, `Secure` when HTTPS detected, strict client-side entropy acceptance, idle timeout 30 min, absolute lifetime 12 h, ID rotation on privilege change.
-5. Logout destroys session + regenerates all tokens.
-6. WebSocket: `POST /api/ws/ticket` mints a one-time, 60 s, HMAC-signed ticket bound to user id; Node verifies signature + ticket table, then binds the socket to the user. All pushes are addressed by user id.
-7. SSH terminal: browser opens `ws://…/ws?channel=terminal&conn=<id>&ticket=<ticket>`; Node calls PHP's internal endpoint (shared secret, internal network only) to confirm the user may use that connection and to fetch decrypted credentials. Credentials cross only the internal Docker network, never the browser.
+1. `GET /api/bootstrap` — establishes session, returns CSRF token, login state, published policy.
+2. `POST /api/auth/login` — CSRF + same-origin checked by the Kernel, lockout checked
+   (5 failures → exponential backoff; also an account-level ceiling across IPs),
+   `password_verify`, session ID rotation, fresh CSRF token.
+3. First-boot admins created from `ADMIN_PASSWORD` are forced through a password change
+   (`must_change_pw`); the bootstrap command enforces the password policy unless `--force`
+   is passed explicitly.
+4. Every API call: session (active user re-queried per request) → rate limit (token bucket per
+   user-or-IP) → CSRF token + Origin check on every non-GET → route dispatch → controller-level
+   RBAC (`Guard::requireUser` / `requireAdmin`, `Policy::assertCan` for mount capabilities).
+5. Session hardening: `cookie_httponly`, `SameSite=Strict`, `Secure` when HTTPS, strict mode,
+   idle timeout 30 min, absolute lifetime 12 h, user-agent binding, rotation on login and on
+   password change.
+6. Logout destroys the session; the SPA clears its caches and returns to the login screen.
 
 ### RBAC
 
-- `admin`: user management, mount/connection management (any), audit log (all), all operations.
-- `user`: only mounts explicitly granted (or all mounts flagged `is_visible_all`), own favorites/recent/jobs/audit rows, operations allowed by mount flags (`is_readonly`, quota).
-- Per-operation capability checks (e.g. write ops rejected on read-only mounts) live in `FileService`.
+- `admin`: user management, mount management, everything else.
+- `user`: only mounts explicitly granted (or flagged `is_visible_all`), own
+  favorites/recent/jobs/shares, operations allowed by mount flags (`is_readonly`, quota).
+- Per-operation capability checks live in `FileService` / `Policy`; read-only grants reject
+  writes, including through the job-backed paths (checked at enqueue time).
 
-## 5. Storage abstraction
+## 5. Storage & encryption
 
 ```php
 interface StorageAdapter {
-    list(string $path): array;         // entries with stat metadata
-    stat(string $path): array;
-    mkdir(string $path, bool $recursive): void;
-    rm(string $path, bool $recursive): void;         // permanent
-    rename(string $from, string $to): void;
-    copy(string $from, string $to): void;
-    getStream(string $path, int $from=-1, int $len=-1) // for download/preview ranges
-    putStream(string $path, $stream): int;           // upload / server-side chunk sink
-    exists(string $path): bool;
-    du(string $path): array;           // size + file count
-    search(string $path, string $needle, int $limit): array;
+    list/stat/mkdir/rm/rename/copy/exists/du/search
+    getStream(path, from, len)   // ranged reads for download/preview
+    putStream(path, stream)      // upload / server-side chunk sink
 }
 ```
 
-- **LocalAdapter** — hardened: canonicalized root; every resolved path must remain inside
-  the root (rejects `..` and symlink escapes by `realpath` containment on every segment
-  boundary that exists); follows mounts' `is_readonly`.
-- **FtpAdapter / FtpsAdapter** — `ext-ftp`, explicit TLS for FTPS, passive mode, credentials
-  from `ConnectionService` (decrypted server-side, held only for the request).
-- **SftpAdapter** — phpseclib3; password or private-key auth; host-key fingerprint stored on
-  first use and pinned afterwards (TOFU) in `connections.fingerprint`.
-- **SmbAdapter** — `smbclient` subprocess built exclusively with `escapeshellarg()` per
-  argument (no shell string interpolation); credentials passed via auth file (fd), never argv.
-- **HttpAdapter** — WebDAV-ish: GET/PUT/MKCOL/PROPFIND/DELETE/MOVE/COPY over cURL with a
-  strict SSRF guard (deny private/link-local/loopback targets unless admin allowlisted).
+- **LocalAdapter** — hardened: canonicalized root; every resolved path must remain inside the
+  root (lexical `..` rejection plus `realpath` containment, so symlink escapes are refused);
+  honours `is_readonly`; trash is a hidden directory filtered from listings.
+- **S3Adapter** — hand-rolled SigV4 over ext-curl for S3-compatible stores (AWS S3, Cloudflare
+  R2, MinIO, Wasabi, B2). Virtual-host or path-style addressing, bucket + region + path-style
+  held in the connection's encrypted `extra` JSON, and an SSRF guard on the endpoint at save
+  time. Credentials are decrypted server-side per request and never reach the browser.
+- **EncryptedAdapter + FileCipher** — every write becomes a self-describing `ANSNEWC1`
+  container: 56-byte header (mime, extension, plaintext size, file id, key id), 1 MiB chunks,
+  each AES-256-GCM with a per-file random nonce base + chunk index and AAD binding
+  (magic, version, keyId, fileId, index) — reordering, truncation and splicing are detected.
+  The per-file data key is wrapped under the master key (`data/keys/file.key`), so key rotation
+  is cheap. MIME sniffing reads the header, since ciphertext sniffs as garbage. Writes publish
+  atomically via a temp file + rename.
+- Master keys: `APP_KEY` (stored secrets, share-grant HMAC) and `ANSNEW_FILE_KEY` (file
+  contents) — separate so losing one does not doom the other. Both are 64-hex, auto-generated
+  into `data/keys/` (mode 0660) on first boot.
 
-`StorageManager::forUser($user)` returns the mount list the user may see;
-`StorageManager::mount($name, $user)` resolves one mount into an adapter after RBAC.
-The frontend addresses files as `mount:/some/path`; mounts are namespaced so no user can
-cross mount boundaries, and every path is re-validated server-side.
+Files are addressed as `mount:/some/path`; every path is re-validated server-side and no user
+can cross mount boundaries.
 
-## 6. Background jobs & real-time
+## 6. Background jobs
 
-- Mutating "long" operations (archive, extract, recursive copy/move/delete, folder
-  download, usage scan) enqueue a `jobs` row and return a job id immediately.
-- `bin/worker.php` claims jobs (transactional), runs the handler, updates progress 0–100,
-  and POSTs progress to the WS internal endpoint for fan-out.
+- Long operations (archive, extract, recursive copy/move/delete, download-selection ZIP
+  packing, usage scan) enqueue a `jobs` row and return a job id immediately.
+- `bin/worker.php` claims jobs transactionally, runs the handler, updates progress 0–100.
 - **Crash recovery.** A claim takes a *lease* (`jobs.lease_expires_at`) and increments
   `jobs.attempts`. The lease is renewed by every progress update and by
-  `AbstractHandler::checkCancel()` (throttled), so a long job is never mistaken for a
-  dead one. On start the worker calls `JobService::recoverOrphans()` — anything still
-  `running` was orphaned by a previous crash (there is a single worker container) — and
-  while idle it periodically runs `JobService::reapStale()`, which requeues expired jobs
-  with exponential backoff (`jobs.next_attempt_at`) until `jobs.max_attempts` is reached,
-  then fails them. Retries are at-least-once: a requeued handler may repeat side effects.
-- WS events delivered to browsers: `job.progress`, `job.done`, `notify`, `terminal.data`,
-  `terminal.exit`. The frontend surfaces toasts + a job drawer with cancel support
-  (cancel = `jobs.status='canceled'`; handlers poll a cancellation flag between chunks).
-- Small operations (mkdir, rename, single-file delete, small copy) execute inline and
-  return the new listing delta synchronously.
+  `AbstractHandler::checkCancel()`. On start the worker calls `JobService::recoverOrphans()`
+  (anything still `running` was orphaned by a crash — there is a single worker container);
+  while idle it runs `JobService::reapStale()`, which requeues expired jobs with exponential
+  backoff until `jobs.max_attempts`, then fails them. Retries are at-least-once.
+- The frontend polls `GET /api/jobs` every 3 s while the drawer is open and something is in
+  flight — that poll is the only progress channel (there is no WebSocket in this build).
+- Hourly worker sweeps: trash retention, prepared download archives, and staged upload chunks
+  (both plaintext on disk by nature, so retention is deliberately short).
+- Small operations (mkdir, rename, single-file delete, small copy) execute inline and return
+  synchronously.
 
 ## 7. Frontend SPA
 
-Vanilla ES modules, no build step, no CDN at runtime.
+Vanilla ES modules, no build step, no CDN at runtime, single light theme (CSS custom properties).
 
-- **Views**: login, Files (main desktop), Trash, Jobs, Favorites/Recent (sidebar), Admin →
-  Users, Mounts, Connections, Audit.
-- **Files view**: toolbar (new folder/file, upload, download, cut/copy/paste, rename,
-  delete, archive, extract, view toggle, sort, search), tabs (multiple locations),
-  optional split pane (two independent panes, drag between them), grid/list toggle,
-  breadcrumb, selection (click, ctrl, shift, rubber band), context menu, details pane.
-- **Uploads**: drag-and-drop anywhere + picker; small files POST directly with XHR
-  progress; large files auto-switch to chunked upload (`uploadId` + chunk endpoints);
-  per-file progress, pause-ish cancel (abort XHR), conflict dialog (overwrite/skip/rename).
-- **Keyboard**: Del, F2, Ctrl+C/X/V/A/F, F5, F3 preview, Alt+←/→ history, Ctrl+Tab tabs,
-  Enter open, Backspace up, Ctrl+1…9 jump tab, Esc close dialog/exit preview.
-- **Previews** (sandboxed): images, video/audio, PDF (`<object sandbox>`), and a hex fallback
-  for binary content. Text and code files do **not** use the read-only preview — they open in
-  the code editor below.
+- **Views**: login, Files (main desktop), Trash, Recent, Favourites, Shared links, Settings,
+  Admin → Users, Mounts, S3/R2 Connections.
+- **Files view**: windowed listing (bounded DOM for 10k+ entries), tabs, split pane, drag &
+  drop (intra-pane, inter-pane, and external upload), grid/list/details view modes, sort,
+  filter, search, breadcrumb, selection (click/ctrl/shift/rubber band), context menus,
+  details pane, keyboard navigation.
+- **Uploads**: drag-and-drop anywhere + pickers (files or whole folders); small files POST
+  directly; large files auto-switch to resumable chunked uploads; per-file progress + cancel.
+- **Downloads**: direct files stream straight through the File System Access API where
+  available (real progress/ETA), otherwise the browser's own download UI; folders/multi-item
+  selections are packed by the worker and then downloaded through the same tray.
 - **Code editor** (`editor.js`): full-screen monospace editor with a line-number gutter,
-  `Ctrl`+`S` save, Revert, Download, a wrap toggle, a rendered Markdown preview, and a
-  `Ln`/`Col` + line-ending/BOM status bar. Backed by `GET /api/fs/{mount}/text` and
-  `POST /api/fs/{mount}/write` (`FileService::readText()` / `writeText()`).
-  Reads refuse binary content (415 — a NUL sniff over the first 8 KiB, done *before* the
-  size cap so a huge binary falls back to the hex view rather than reporting "too large")
-  and oversize files (413, `EDIT_MAX_BYTES`). Writes reuse the upload blocklist, so
-  protected extensions open read-only, and carry a sha256 of the bytes that were read
-  (`baseHash`) — a concurrent edit is refused with **409** instead of being clobbered.
-  CRLF and a UTF-8 BOM are reported on read and restored on save.
-  **Routing policy:** a file opens in the editor unless there is a named reason not to
-  (a known binary/media extension or MIME type); an unknown or absent extension opens the
-  editor, and the server's 415 is the backstop.
-- **Selection**: click, Ctrl, Shift, Ctrl+A and keyboard navigation, plus a **rubber band** —
-  dragging from empty space selects every row/tile the rectangle covers, with Ctrl to add,
-  Esc to cancel and edge auto-scroll. Intersections are computed from the row *index* using
-  the same pitch the layout uses, not by reading the DOM, so rows outside the render window
-  are selected correctly and no layout is forced per pointermove.
-- **Themes**: CSS custom properties; dark/light + accent; persisted per user (DB) and
-  localStorage.
-- **Terminal**: lightweight built-in terminal (line-buffered, ANSI-aware) over the WS
-  terminal channel — no external terminal library needed.
+  `Ctrl`+`S` save, Revert, a wrap toggle, a rendered Markdown preview, and a status bar.
+  Backed by `GET /api/fs/{mount}/text` and `POST /api/fs/{mount}/write`
+  (`FileService::readText()` / `writeText()`). Reads refuse binary content (415 — a NUL sniff
+  over the first 8 KiB) and oversize files (413, `EDIT_MAX_BYTES`); writes carry a sha256 of
+  the bytes that were read (`baseHash`) — a concurrent edit is refused with **409** instead of
+  being clobbered. CRLF and a UTF-8 BOM are reported on read and restored on save. Protected
+  extensions and read-only mounts open the file read-only, with the reason shown.
+- **Previews** (sandboxed, never render user content as active): images, video/audio
+  (custom player with Range streaming), PDF, hex fallback.
+- **Public share pages** are server-rendered: password form POSTs, then an HttpOnly access
+  grant cookie keeps the password out of every subsequent URL.
 
 ## 8. Configuration
 
-Everything is environment-first (`.env` consumed by compose):
+Everything is environment-first (`.env` consumed by compose). Key variables (see
+`.env.example` for the full annotated list):
 
 | var | meaning |
 |---|---|
-| `APP_URL` | canonical base URL (cookie scope) |
-| `APP_KEY` | optional 64-hex key; if empty, generated to `data/keys/app.key` on first boot |
-| `WS_SECRET` | shared secret PHP↔WS internal API (generated if empty) |
-| `DB_DRIVER` | `sqlite` (default) or `mysql` |
-| `DB_*` | mysql credentials when enabled |
-| `ADMIN_USER` / `ADMIN_PASSWORD` | bootstrap admin (random printed if unset) |
+| `APP_URL` | canonical base URL (same-origin checks) |
+| `APP_KEY` / `ANSNEW_FILE_KEY` | master keys; generated into `data/keys/` when empty |
+| `ADMIN_USER` / `ADMIN_PASSWORD` | bootstrap admin (default `admin` if unset; a change is forced at first sign-in) |
+| `PASSWORD_MIN_LENGTH` | minimum password length (default 10) |
 | `SESSION_LIFETIME`, `IDLE_TIMEOUT`, `SESSION_SECURE_COOKIE` | session policy |
-| `UPLOAD_MAX_BYTES`, `CHUNK_SIZE` | upload policy (chunked uploads above `CHUNK_SIZE`) |
-| `EDIT_MAX_BYTES` | largest file the code editor will open or save |
-| `RATE_LIMIT_*` | API rate limiting |
-| `TRUST_PROXY` | honour `X-Forwarded-For` for the client IP (rate limit, lockout, audit) |
-| `JOB_LEASE_SECONDS`, `JOB_MAX_ATTEMPTS` | worker crash recovery: lease length, retries before failing |
-| `USAGE_RESCAN_DEBOUNCE` | seconds between automatic usage re-scans of a mount |
-| `SSRF_ALLOW_PRIVATE` | admin opt-in to allow private-network remote connections |
-| `TRASH_ENABLED`, `TRASH_RETENTION_DAYS` | local trash on delete |
-| `HTTP_PORT`, `PUBLIC_HTTP_PORT`, `HTTPS_PORT` | published ports: app, ACME+redirect, TLS |
-| `CERTS_HOST_PATH`, `ACME_WEBROOT_HOST_PATH`, `BACKUP_HOST_PATH` | host dirs for TLS material, ACME challenges, backup snapshots |
-| `IMAGE_NGINX`, `IMAGE_PHP`, `IMAGE_WS`, `IMAGE_NAS` | image references — build locally or pull from a registry |
+| `UPLOAD_MAX_BYTES`, `CHUNK_SIZE` | upload policy |
+| `EDIT_MAX_BYTES` | largest file the built-in code editor will open or save |
+| `RATE_LIMIT_*`, `LOGIN_*` | API rate limiting + brute-force lockout |
+| `TRUST_PROXY` | honour `X-Forwarded-For` for the client IP |
+| `SSRF_ALLOW_PRIVATE`, `SSRF_ALLOWLIST` | remote-connection target policy (see `Support/SsrfGuard`) |
+| `JOB_LEASE_SECONDS`, `JOB_MAX_ATTEMPTS` | worker crash recovery |
+| `ANSNEW_ENCRYPT_LOCAL`, `ANSNEW_FILE_KEY_ID` | encryption at rest + key rotation hook |
+| `TRASH_ENABLED`, `TRASH_RETENTION_DAYS` | trash policy |
+| `HTTP_PORT`, `PUBLIC_HTTP_PORT`, `HTTPS_PORT`, `CERTS_HOST_PATH`, `ACME_WEBROOT_HOST_PATH` | ports + TLS material |
 
-> `App\Config\Config` reads env vars from a **hardcoded whitelist**: a variable read by
-> code but missing from that list silently falls back to its default. Add new keys there
-> as well as to `.env`.
+> `App\Config\Config` reads env vars from a **hardcoded whitelist**: a variable read by code
+> but missing from that list silently falls back to its default. Add new keys there as well
+> as to `.env`.
 
-Volumes: `data_volume` (database, encryption keys, logs, temp), `db_volume` (MariaDB,
-`mysql` profile only) and `storage_volume` (default local mount root). Host binds
-(`STORAGE_HOST_PATH`, `CERTS_HOST_PATH`, `BACKUP_HOST_PATH`) are configured in `.env`.
+Volumes: `data_volume` (database, encryption keys, sessions, temp) and `storage_volume`
+(default local mount root). The host bind `STORAGE_HOST_PATH` maps onto
+`/srv/storage/local`, which is where the default mount lives.
 
 ## 9. Security model (enforced where?)
 
 | threat | control |
 |---|---|
-| path traversal / arbitrary file access | `PathGuard` canonicalization per mount + adapter containment + no client-visible absolute paths |
-| symlink escape | LocalAdapter resolves symlinks and rejects targets outside root |
-| SQLi | PDO prepared statements only, no string-built SQL |
-| XSS | all dynamic output via `textContent`/attribute-safe builders; no innerHTML with user data; sanitized markdown renderer |
-| CSRF | SameSite=Strict + per-session token on all mutating verbs + Origin check |
-| session hijack | httponly, Secure, rotation on login, idle/absolute timeouts, UA+IP soft binding |
-| brute force | per user+IP counters, exponential lockout, audit events |
-| malicious upload | extension blocklist (php/php*/phtml/htaccess/…), finfo MIME check, double-extension detection, quarantine names, size caps, uploads stored outside web root, never executed |
-| RCE / command injection | no `exec` except smbclient with per-arg `escapeshellarg`; no eval; PHP files never served from storage |
-| SSRF | HttpAdapter target validation, DNS-resolved IP check, admin allowlist override |
-| protocol abuse | connections are admin-created and per-user granted; internal WS/PHP endpoints require shared secret |
-| privilege escalation | RBAC on every route; mounts grant-scoped; secrets decryptable only server-side |
-| destructive-action abuse (unattended session, stray key) | `SensitiveGate`: password/2FA re-auth required for disconnect/delete/clear, grant held server-side, 60 s TTL, `fs.delete-to-trash` toggleable |
-| info leak | `data/` never web-served; JSON errors generic; audit without secrets |
+| stolen disk / backup | every file is an AES-256-GCM container with per-file wrapped keys; keys live outside the storage root |
+| path traversal / arbitrary file access | `PathGuard` canonicalization per mount + adapter containment; no client-visible absolute paths |
+| symlink escape | LocalAdapter rejects targets whose realpath leaves the root |
+| SQLi | PDO prepared statements only |
+| XSS | SPA builds DOM with `textContent` and attribute-safe helpers; CSP `default-src 'self'`; previews never render user content as active |
+| CSRF | SameSite=Strict + per-session token on every mutating verb + Origin check |
+| session hijack | httponly, Secure over HTTPS, rotation on login/password change, idle + absolute timeouts, UA binding, constant-time compare |
+| brute force / password spray | per username+IP and per-account counters, exponential lockout, rate limiting |
+| malicious upload | extension blocklist on every dot segment, content sniffing for executables, size caps, staging outside the web root, never executed |
+| share-link abuse | 256-bit tokens stored only hashed, optional bcrypt password (min 6), expiry, revoke/rotate, read-only scope, access counted |
+| info leak | `data/` never web-served; 5xx responses are generic (details go to the log only); `X-Robots-Tag: noindex` |
+| abandoned plaintext | temp archives and staged chunks swept hourly by the worker; download tokens are one-shot and encrypted |
+| remote-credential theft | S3 secrets stored AES-256-GCM encrypted, decrypted only per request inside PHP; SSRF-guarded endpoints; read-only scope enforced by the same RBAC as local drives |

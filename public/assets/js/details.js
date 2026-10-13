@@ -9,7 +9,6 @@
 import { el, clear, fmtSize, fmtDate } from './util.js';
 import { icon, iconFor } from './icons.js';
 import { isFavorite } from './state.js';
-import { isThumbnailable, thumbUrl } from './thumbnails.js';
 
 export class DetailsPanel {
   /**
@@ -55,13 +54,7 @@ export class DetailsPanel {
     const mount = pane ? pane.loc.mount : '';
     const head = el('div', { class: 'details-head' });
 
-    if (isThumbnailable(e)) {
-      const img = el('img', { class: 'details-thumb', alt: e.name, 'data-thumb': thumbUrl(mount, e.path, 256, e.mtime) });
-      img.src = img.dataset.thumb;
-      head.appendChild(img);
-    } else {
-      head.appendChild(icon(iconFor(e), 'details-ico'));
-    }
+    head.appendChild(icon(iconFor(e), 'details-ico'));
     head.appendChild(el('div', { class: 'details-title', text: e.name, title: e.name }));
     head.appendChild(el('div', { class: 'muted', text: e.type === 'dir' ? 'Folder' : (e.mime || 'File') }));
     this.body.appendChild(head);

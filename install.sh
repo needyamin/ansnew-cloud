@@ -31,8 +31,6 @@
 #    --admin-password 'x'     bootstrap admin password   (default: prompted,
 #                             or random when non-interactive)
 #    --app-url http://a.b.c:8080   canonical URL (default: http://<host-ip>:<port>)
-#    --nas                    also enable the optional SMB / NAS profile (445)
-#    --mysql                  use MariaDB instead of the default SQLite
 #    --cn                     prefer Chinese mirrors for apt / Docker
 #    --force-env              rewrite an existing .env
 #    --no-start               install deps + write .env only, do not build/start
@@ -49,7 +47,7 @@ DEFAULT_DIR="/opt/ansnew-cloud"
 # --- options -----------------------------------------------------------------
 HTTP_PORT=""; APP_DIR=""; STORAGE_DIR=""
 ADMIN_USER="admin"; ADMIN_PASSWORD=""; APP_URL=""; ADMIN_EMAIL="admin@example.com"
-ENABLE_NAS=0; USE_MYSQL=0; CN=0; NO_START=0; FORCE_ENV=0
+CN=0; NO_START=0; FORCE_ENV=0
 DOMAIN=""; USE_TLS=0; HTTPS_PORT=""
 
 # --- output helpers ----------------------------------------------------------
@@ -86,9 +84,7 @@ Options
   --admin-password 'x'     bootstrap admin password (prompted, or random if non-interactive)
   --admin-email a@b.c      bootstrap admin email
   --app-url http://a.b:8080  canonical URL (default: http://<host-ip>:<port>)
-  --nas                    also enable the optional SMB / NAS profile (TCP 445).
                           Do NOT use on a public host.
-  --mysql                  use MariaDB instead of the default SQLite
   --cn                     prefer Chinese mirrors for apt / Docker
   --force-env              rewrite an existing .env (old one is backed up)
   --no-start               install deps + write .env only, do not build/start
@@ -97,7 +93,7 @@ Options
 Re-running is safe: an existing .env is kept unless --force-env is given.
 
 Going on the public internet? Read docs/DEPLOY.md first — it covers DNS,
-firewall, real TLS + renewal, backups and the upgrade runbook.
+firewall, real TLS + renewal and the upgrade runbook.
 USAGE
     exit 0
 }
@@ -113,8 +109,6 @@ while [[ $# -gt 0 ]]; do
         --app-url)        APP_URL="${2:?--app-url needs a value}"; shift 2 ;;
         --domain)         DOMAIN="${2:?--domain needs a value}"; shift 2 ;;
         --tls)            USE_TLS=1; shift ;;
-        --nas)            ENABLE_NAS=1; shift ;;
-        --mysql)          USE_MYSQL=1; shift ;;
         --cn)             CN=1; shift ;;
         --force-env)      FORCE_ENV=1; shift ;;
         --no-start)       NO_START=1; shift ;;
@@ -394,22 +388,6 @@ setup_env() {
     STORAGE_DIR="${STORAGE_DIR:-$APP_DIR/storage-root}"
     set_env STORAGE_HOST_PATH "$STORAGE_DIR" "$envf"
 
-    # --- optional profiles ----------------------------------------------------
-    local profiles=""
-    if (( ENABLE_NAS )); then
-        local nasp; nasp="$(gen_pass)"
-        set_env NAS_PASS "\"${nasp}\"" "$envf"
-        set_env NAS_USER "ansnew" "$envf"
-        profiles="nas"
-        port_in_use 445 && warn "port 445 is busy on this host — the SMB share may not bind"
-    fi
-    if (( USE_MYSQL )); then
-        local dbpw; dbpw="$(gen_pass)"
-        set_env DB_DRIVER   "mysql"       "$envf"
-        set_env DB_PASSWORD "\"${dbpw}\"" "$envf"
-        profiles="${profiles:+$profiles,}mysql"
-    fi
-    [[ -n $profiles ]] && set_env COMPOSE_PROFILES "$profiles" "$envf"
 
     chmod 600 "$envf"
     ok ".env written (mode 600)$( (( fresh )) && printf ' · admin credentials set' )"
@@ -420,19 +398,7 @@ setup_env() {
         || { chmod -R 0777 "$STORAGE_DIR"; warn "could not chown $STORAGE_DIR to uid 82 — fell back to 0777"; }
     ok "storage root: $STORAGE_DIR"
 
-    # The backups bind (${BACKUP_HOST_PATH:-./backups} -> /backups) is written
-    # by the php container as uid 82; a root-owned auto-created directory
-    # would make the first `ansnew:backup` fail with EACCES.
-    local bdir; bdir="$(grep -sE '^BACKUP_HOST_PATH=' "$envf" | cut -d= -f2- | tr -d '"')"
-    bdir="${bdir:-$APP_DIR/backups}"
-    mkdir -p "$bdir"
-    chown 82:82 "$bdir" 2>/dev/null \
-        || { chmod 0777 "$bdir"; warn "could not chown $bdir to uid 82 - fell back to 0777"; }
-    ok "backups dir: $bdir"
 
-    # Defensive: a fresh clone has no files under ws-server/lib, but the ws
-    # image COPYs that directory, so make sure it exists before building.
-    mkdir -p "$APP_DIR/ws-server/lib"
     chmod +x "$APP_DIR/ansnew" 2>/dev/null || true
 }
 
@@ -452,7 +418,7 @@ wait_healthy() {
             fi
         done <<< "$out"
         ok_all=1
-        for need in nginx php ws; do
+        for need in nginx php worker; do
             grep -qE "^${need}\|.*(healthy|Up)" <<< "$out" || ok_all=0
         done
         (( ok_all )) && return 0
@@ -492,9 +458,6 @@ ensure_cert() {
 
 start_stack() {
     cd "$APP_DIR"
-    (( ENABLE_NAS )) && COMPOSE_ARGS+=(--profile nas)
-    (( USE_MYSQL ))  && COMPOSE_ARGS+=(--profile mysql)
-
     step "Validating compose configuration"
     compose config >/dev/null || die "docker compose config failed — check $APP_DIR/.env"
 
@@ -509,7 +472,7 @@ start_stack() {
     compose up -d || die "docker compose up failed"
     ok "containers started"
 
-    step "Waiting for nginx / php / ws to report healthy"
+    step "Waiting for nginx / php / worker to report healthy"
     if wait_healthy; then
         ok "all services healthy"
     else

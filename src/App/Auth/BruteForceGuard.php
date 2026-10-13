@@ -8,7 +8,12 @@ use App\Core\Database;
 use App\Config\Config;
 
 /**
- * Brute-force guard: per-username+IP failure counting with exponential lockout.
+ * Brute-force guard: failure counting with exponential lockout.
+ *
+ * Two layers:
+ *  - per username+IP (the classic lockout), and
+ *  - per username across all IPs, so an attacker rotating source addresses
+ *    cannot stretch a single password-spray campaign indefinitely.
  */
 final class BruteForceGuard
 {
@@ -33,6 +38,20 @@ final class BruteForceGuard
             $extra = $fails - $max;
             $lock = min($base * (2 ** min($extra, 10)), $maxLock);
             return $lock; // seconds remaining lockout window recommendation
+        }
+
+        // Account-level layer: same username failing from *any* address.
+        // Deliberately high ceiling (3x the per-IP one) so ordinary users who
+        // mistype on a phone and a laptop are unaffected; past it the account
+        // is frozen for the maximum window regardless of source IP.
+        $row = $db->one(
+            'SELECT COUNT(*) AS c FROM login_attempts
+             WHERE username = :u AND success = 0 AND created_at > :since',
+            [':u' => $username, ':since' => $since]
+        );
+        $acctFails = (int) ($row['c'] ?? 0);
+        if ($acctFails >= $max * 3) {
+            return $maxLock;
         }
         return null;
     }

@@ -32,9 +32,6 @@ final class BootstrapController
             'sessionLifetime' => $cfg->getInt('SESSION_LIFETIME', 43200),
             'loginMaxAttempts' => $cfg->getInt('LOGIN_MAX_ATTEMPTS', 5),
             'blockedExtensions' => \App\Support\Validator::FORBIDDEN_UPLOAD_EXT,
-            // Lets the UI know which actions need a password re-entry and how
-            // long a grant lasts, instead of hardcoding server policy.
-            'sensitive' => \App\Auth\SensitiveGate::publicInfo(),
         ]);
     }
 }

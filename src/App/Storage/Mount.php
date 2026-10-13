@@ -6,6 +6,7 @@ namespace App\Storage;
 
 /**
  * Mount definition + per-user permission snapshot.
+ * Local storage and S3-compatible remotes.
  */
 final class Mount
 {
@@ -33,7 +34,7 @@ final class Mount
             (int) $row['id'],
             (string) $row['name'],
             (string) $row['label'],
-            (string) $row['adapter'],
+            (string) ($row['adapter'] ?? 'local'),
             isset($row['local_root']) ? (string) $row['local_root'] : null,
             isset($row['connection_id']) && $row['connection_id'] !== null ? (int) $row['connection_id'] : null,
             (string) ($row['remote_path'] ?? '/'),

@@ -9,16 +9,12 @@ use App\Auth\SessionManager;
 use App\Core\Request;
 use App\Core\Response;
 use App\Services\JobService;
-use App\Services\AuditService;
-use App\Services\NotifyService;
 use App\Services\DownloadService;
 use App\Services\FavoritesService;
 use App\Services\FileService;
-use App\Services\ThumbnailService;
 use App\Storage\StorageManager;
 use App\Support\PathGuard;
 use App\Support\Validator;
-use RuntimeException;
 
 /**
  * Filesystem endpoints. Mount resolution + path validation + RBAC all happen
@@ -61,8 +57,6 @@ final class FsController
         $user = Guard::requireUser($session);
         $body = $req->json();
         $r = FileService::mkdir($user, $mount, (string) ($body['path'] ?? '/'), (string) ($body['name'] ?? ''));
-        AuditService::log($user, 'fs.mkdir', $mount, $r['path'], null, 'ok', '', $req->ip(), $req->userAgent());
-        NotifyService::fsChanged($user->id, [$mount => [PathGuard::dirname($r['path'])]], 'mkdir');
         return Response::ok($r);
     }
 
@@ -71,8 +65,6 @@ final class FsController
         $user = Guard::requireUser($session);
         $body = $req->json();
         $r = FileService::createFile($user, $mount, (string) ($body['path'] ?? '/'), (string) ($body['name'] ?? ''));
-        AuditService::log($user, 'fs.create', $mount, $r['path'], null, 'ok', '', $req->ip(), $req->userAgent());
-        NotifyService::fsChanged($user->id, [$mount => [PathGuard::dirname($r['path'])]], 'create');
         return Response::ok($r);
     }
 
@@ -81,12 +73,6 @@ final class FsController
         $user = Guard::requireUser($session);
         $body = $req->json();
         $r = FileService::rename($user, $mount, (string) ($body['path'] ?? ''), (string) ($body['name'] ?? ''));
-        AuditService::log($user, 'fs.rename', $mount, (string) ($body['path'] ?? ''), $r['path'], 'ok', '', $req->ip(), $req->userAgent());
-        // Renaming a directory also changes the identity of everything inside it,
-        // so the old path is announced too and its subtree gets invalidated.
-        NotifyService::fsChanged($user->id, [
-            $mount => array_values(array_unique([PathGuard::dirname($r['path']), (string) ($body['path'] ?? '')])),
-        ], 'rename');
         return Response::ok($r);
     }
 
@@ -111,16 +97,10 @@ final class FsController
                 'mount' => $mount, 'path' => $path,
                 'destMount' => $destMount, 'destDir' => $destDir, 'conflict' => $conflict,
             ]);
-            AuditService::log($user, 'fs.copy.job', $mount, $path, $destMount . ':' . $destDir, 'ok', 'job ' . $jobId, $req->ip(), $req->userAgent());
             return Response::ok(['job' => $jobId, 'async' => true]);
         }
 
         $r = FileService::copyInline($user, $mount, $path, $destDir, $conflict);
-        AuditService::log($user, 'fs.copy', $mount, $path, null, 'ok', '', $req->ip(), $req->userAgent());
-        NotifyService::fsChanged($user->id, self::dirMap([
-            [$mount, PathGuard::dirname($path)],
-            [$destMount, $destDir],
-        ]), 'copy');
         return Response::ok($r + ['async' => false]);
     }
 
@@ -144,16 +124,10 @@ final class FsController
                 'mount' => $mount, 'path' => $path,
                 'destMount' => $destMount, 'destDir' => $destDir, 'conflict' => $conflict,
             ]);
-            AuditService::log($user, 'fs.move.job', $mount, $path, $destMount . ':' . $destDir, 'ok', 'job ' . $jobId, $req->ip(), $req->userAgent());
             return Response::ok(['job' => $jobId, 'async' => true]);
         }
 
         $r = FileService::moveInline($user, $mount, $path, $destDir, $conflict);
-        AuditService::log($user, 'fs.move', $mount, $path, $r['path'] ?? null, 'ok', '', $req->ip(), $req->userAgent());
-        NotifyService::fsChanged($user->id, self::dirMap([
-            [$mount, PathGuard::dirname($path)],
-            [$destMount, $destDir],
-        ]), 'move');
         return Response::ok($r + ['async' => false]);
     }
 
@@ -165,11 +139,6 @@ final class FsController
         $path = (string) ($body['path'] ?? '');
         $permanent = Validator::bool($body['permanent'] ?? false);
 
-        $gated = \App\Auth\SensitiveGate::guard($session, 'fs.delete', $permanent);
-        if ($gated !== null) {
-            return $gated;
-        }
-
         // Folders can be big -> background job; files inline.
         [$m, $adapter, $norm] = StorageManager::resolve($user, $mount, $path);
         // Gated HERE, not only in the worker: a read-only account must not be
@@ -179,13 +148,10 @@ final class FsController
 
         if (($stat['type'] ?? '') === 'dir') {
             $jobId = JobService::enqueue($user->id, 'delete', ['mount' => $mount, 'path' => $path, 'permanent' => $permanent, 'userId' => $user->id]);
-            AuditService::log($user, 'fs.delete.job', $mount, $path, null, 'ok', 'job ' . $jobId, $req->ip(), $req->userAgent());
             return Response::ok(['job' => $jobId, 'async' => true]);
         }
 
         $r = \App\Services\TrashService::deletePath($mount, $path, $permanent, null, $user->id);
-        AuditService::log($user, 'fs.delete', $mount, $path, null, 'ok', $r['trashed'] ? 'trashed' : 'permanent', $req->ip(), $req->userAgent());
-        NotifyService::fsChanged($user->id, [$mount => [PathGuard::dirname($path)]], 'delete');
         return Response::ok($r + ['async' => false]);
     }
 
@@ -200,28 +166,6 @@ final class FsController
 
     /** Hard cap so a hostile or buggy client can't enqueue unbounded work. */
     private const BATCH_LIMIT = 500;
-
-    /**
-     * Build a mount => directories map for a change notification, merging
-     * repeats and dropping empty entries.
-     *
-     * @param array<int,array{0:string,1:string}> $pairs [mount, directory] tuples
-     * @return array<string,string[]>
-     */
-    private static function dirMap(array $pairs): array
-    {
-        $map = [];
-        foreach ($pairs as [$m, $dir]) {
-            if ($m === '' || $dir === '') {
-                continue;
-            }
-            $map[$m] = array_merge($map[$m] ?? [], [$dir]);
-        }
-        foreach ($map as $m => $dirs) {
-            $map[$m] = array_values(array_unique($dirs));
-        }
-        return $map;
-    }
 
     /**
      * @param mixed $raw
@@ -261,14 +205,6 @@ final class FsController
         }
         $permanent = Validator::bool($body['permanent'] ?? false);
 
-        // Whole-selection deletes are the easiest thing to trigger by accident
-        // (Ctrl+A, Delete), so the password is asked once for the batch rather
-        // than per item.
-        $gated = \App\Auth\SensitiveGate::guard($session, 'fs.delete', $permanent);
-        if ($gated !== null) {
-            return $gated;
-        }
-
         // Resolve the destination mount once and gate the whole batch on it.
         // Deletion had no permission check at all before, so a read-only grant
         // did not prevent deleting. mountFor() is the per-user view: it folds
@@ -295,23 +231,15 @@ final class FsController
                     $jobId = JobService::enqueue($user->id, 'delete', [
                         'mount' => $mount, 'path' => $norm, 'permanent' => $permanent, 'userId' => $user->id,
                     ]);
-                    AuditService::log($user, 'fs.delete.job', $mount, $norm, null, 'ok', 'job ' . $jobId, $req->ip(), $req->userAgent());
                     $async[] = ['path' => $norm, 'job' => $jobId];
                     continue;
                 }
                 $r = \App\Services\TrashService::deletePath($mount, $norm, $permanent, null, $user->id);
-                AuditService::log($user, 'fs.delete', $mount, $norm, null, 'ok', $r['trashed'] ? 'trashed' : 'permanent', $req->ip(), $req->userAgent());
                 $done[] = ['path' => $norm] + $r;
             } catch (\Throwable $e) {
                 $failed[] = ['path' => $path, 'error' => $e->getMessage()];
             }
         }
-        // One notification for the whole batch, not one per item.
-        $touched = array_merge(array_column($done, 'path'), array_column($async, 'path'));
-        NotifyService::fsChanged($user->id, self::dirMap(array_map(
-            static fn (string $p): array => [$mount, PathGuard::dirname($p)],
-            $touched
-        )), 'delete-batch');
 
         return Response::ok(['done' => $done, 'async' => $async, 'failed' => $failed]);
     }
@@ -345,14 +273,6 @@ final class FsController
         \App\Auth\Policy::assertCan(null, $m->canWrite, $user->isAdmin(), 'rename');
 
         $r = FileService::renameBatch($user, $mount, $items);
-
-        $touched = array_merge(array_column($r['done'], 'path'), array_column($r['done'], 'newPath'));
-        if ($touched) {
-            NotifyService::fsChanged($user->id, self::dirMap(array_map(
-                static fn (string $p): array => [$mount, PathGuard::dirname($p)],
-                $touched
-            )), 'rename-batch');
-        }
         return Response::ok($r);
     }
 
@@ -431,7 +351,6 @@ final class FsController
                         'mount' => $mount, 'path' => $norm,
                         'destMount' => $destMount, 'destDir' => $destDir, 'conflict' => $conflict,
                     ]);
-                    AuditService::log($user, 'fs.' . $op . '.job', $mount, $norm, $destMount . ':' . $destDir, 'ok', 'job ' . $jobId, $req->ip(), $req->userAgent());
                     $async[] = ['path' => $norm, 'job' => $jobId];
                     continue;
                 }
@@ -440,7 +359,6 @@ final class FsController
                 } else {
                     $r = FileService::moveInline($user, $mount, $norm, $destDir, $conflict);
                 }
-                AuditService::log($user, 'fs.' . $op, $mount, $norm, $r['path'] ?? null, 'ok', '', $req->ip(), $req->userAgent());
                 if (!empty($r['skipped'])) {
                     $skipped[] = ['path' => $norm, 'reason' => 'exists'];
                     continue;
@@ -450,11 +368,6 @@ final class FsController
                 $failed[] = ['path' => $path, 'error' => $e->getMessage()];
             }
         }
-        $touched = array_merge(array_column($done, 'path'), array_column($async, 'path'));
-        NotifyService::fsChanged($user->id, self::dirMap(array_merge(
-            array_map(static fn (string $p): array => [$mount, PathGuard::dirname($p)], $touched),
-            [[$destMount, $destDir]]
-        )), $op . '-batch');
 
         return Response::ok(['done' => $done, 'async' => $async, 'failed' => $failed, 'skipped' => $skipped]);
     }
@@ -470,7 +383,6 @@ final class FsController
             'format' => in_array($body['format'] ?? 'zip', ['zip', 'tar.gz'], true) ? $body['format'] : 'zip',
             'name' => (string) ($body['name'] ?? ''),
         ]);
-        AuditService::log($user, 'fs.archive', $mount, null, null, 'ok', 'job ' . $jobId, $req->ip(), $req->userAgent());
         return Response::ok(['job' => $jobId]);
     }
 
@@ -483,7 +395,6 @@ final class FsController
             'path' => (string) ($body['path'] ?? ''),
             'destDir' => (string) ($body['destDir'] ?? ''),
         ]);
-        AuditService::log($user, 'fs.extract', $mount, (string) ($body['path'] ?? ''), null, 'ok', 'job ' . $jobId, $req->ip(), $req->userAgent());
         return Response::ok(['job' => $jobId]);
     }
 
@@ -553,7 +464,6 @@ final class FsController
         }
 
         FavoritesService::recordRecent($user, $mount, $norm, (string) $stat['name'], 'download');
-        AuditService::log($user, 'fs.download', $mount, $norm, null, 'ok', '', $req->ip(), $req->userAgent());
 
         $size = (int) ($stat['size'] ?? 0);
         $r = self::openRanged($req, $adapter, $norm, $size);
@@ -574,34 +484,6 @@ final class FsController
     }
 
     /** Inline preview (images/text/media) with a sandboxed content type. */
-    /**
-     * GET /api/fs/{mount}/text — file contents plus the metadata the code editor
-     * needs (line ending, BOM, a hash to guard against clobbering).
-     */
-    public static function text(Request $req, SessionManager $session, string $mount): Response
-    {
-        $user = Guard::requireUser($session);
-        $path = (string) $req->query('path', '');
-        return Response::ok(FileService::readText($user, Validator::mountName($mount), $path));
-    }
-
-    /** POST /api/fs/{mount}/write — save the code editor's contents. */
-    public static function write(Request $req, SessionManager $session, string $mount): Response
-    {
-        $user = Guard::requireUser($session);
-        $body = $req->json();
-        $path = (string) ($body['path'] ?? '');
-        $content = (string) ($body['content'] ?? '');
-        $baseHash = isset($body['baseHash']) && is_string($body['baseHash']) && $body['baseHash'] !== ''
-            ? $body['baseHash']
-            : null;
-
-        $r = FileService::writeText($user, Validator::mountName($mount), $path, $content, $baseHash);
-        AuditService::log($user, 'fs.write', $mount, $r['path'], null, 'ok', $r['written'] . ' bytes', $req->ip(), $req->userAgent());
-        NotifyService::fsChanged($user->id, [$mount => [PathGuard::dirname($r['path'])]], 'write');
-        return Response::ok($r);
-    }
-
     public static function preview(Request $req, SessionManager $session, string $mount): Response
     {
         $user = Guard::requireUser($session);
@@ -637,36 +519,29 @@ final class FsController
     }
 
     /**
-     * Server-side thumbnail for image entries. Generated through the storage
-     * adapter (so encrypted files work) and cached on disk.
+     * GET /api/fs/{mount}/text — file contents plus the metadata the code editor
+     * needs (line ending, BOM, a hash to guard against clobbering).
      */
-    public static function thumb(Request $req, SessionManager $session, string $mount): Response
+    public static function text(Request $req, SessionManager $session, string $mount): Response
     {
         $user = Guard::requireUser($session);
         $path = (string) $req->query('path', '');
-        $size = (int) $req->query('size', '256');
+        return Response::ok(FileService::readText($user, Validator::mountName($mount), $path));
+    }
 
-        try {
-            $t = ThumbnailService::generate($user, Validator::mountName($mount), $path, $size);
-        } catch (\RuntimeException $e) {
-            $code = $e->getCode();
-            $status = $code === 404 ? 404 : ($code === 413 ? 413 : ($code === 415 ? 415 : 500));
-            return Response::error($e->getMessage(), $status, 'thumb_unavailable');
-        }
+    /** POST /api/fs/{mount}/write — save the code editor's contents. */
+    public static function write(Request $req, SessionManager $session, string $mount): Response
+    {
+        $user = Guard::requireUser($session);
+        $body = $req->json();
+        $path = (string) ($body['path'] ?? '');
+        $content = (string) ($body['content'] ?? '');
+        $baseHash = isset($body['baseHash']) && is_string($body['baseHash']) && $body['baseHash'] !== ''
+            ? $body['baseHash']
+            : null;
 
-        $stream = @fopen($t['file'], 'rb');
-        if ($stream === false) {
-            return Response::error('Thumbnail unavailable', 404, 'not_found');
-        }
-        $len = (int) (filesize($t['file']) ?: 0);
-
-        $resp = new Response(200, '');
-        $resp->withHeader('Content-Type', $t['mime']);
-        $resp->withHeader('Content-Length', (string) $len);
-        $resp->withHeader('X-Content-Type-Options', 'nosniff');
-        // Private + long-lived: the URL is stable per (path, mtime, size).
-        $resp->withHeader('Cache-Control', 'private, max-age=86400');
-        return $resp->withStream($stream, $len);
+        $r = FileService::writeText($user, Validator::mountName($mount), $path, $content, $baseHash);
+        return Response::ok($r);
     }
 
     public static function stat(Request $req, SessionManager $session, string $mount): Response
@@ -675,17 +550,6 @@ final class FsController
         $path = (string) $req->query('path', '/');
         [, $adapter, $norm] = StorageManager::resolve($user, Validator::mountName($mount), $path);
         return Response::ok($adapter->stat($norm));
-    }
-
-    /** Kick off a folder-download background job (zip prepared server-side). */
-    public static function downloadFolder(Request $req, SessionManager $session, string $mount): Response
-    {
-        $user = Guard::requireUser($session);
-        $body = $req->json();
-        $jobId = JobService::enqueue($user->id, 'download-folder', [
-            'mount' => $mount, 'path' => (string) ($body['path'] ?? ''),
-        ]);
-        return Response::ok(['job' => $jobId]);
     }
 
     /**
@@ -726,7 +590,6 @@ final class FsController
             'paths' => $paths,
             'name' => $name,
         ]);
-        AuditService::log($user, 'fs.download.selection', $mount, null, $name, 'ok', 'job ' . $jobId, $req->ip(), $req->userAgent());
         return Response::ok(['job' => $jobId, 'name' => $name]);
     }
 

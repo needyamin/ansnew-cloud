@@ -107,7 +107,6 @@ final class FileService
         }
         return ['path' => $target, 'name' => $name];
     }
-
     /**
      * Read a file as text for the editor.
      *

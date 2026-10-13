@@ -39,8 +39,6 @@ services:
     depends_on:
       php:
         condition: service_healthy
-      ws:
-        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz || exit 1"]
       interval: 15s
@@ -69,16 +67,6 @@ services:
       - data_volume:/var/www/data
       - storage_volume:/srv/storage
       - ${STORAGE_HOST_PATH:-./storage-root}:/srv/storage/local
-      # DB + encryption-key backup output (ansnew:backup). Kept outside the data
-      # volume so `docker compose down -v` cannot take the backups with it.
-      - ${BACKUP_HOST_PATH:-./backups}:/backups
-    depends_on:
-      db:
-        condition: service_healthy
-        # db only exists under the `mysql` profile; without this key a
-        # plain (sqlite) deployment fails validation with "depends on
-        # undefined service db".
-        required: false
     healthcheck:
       test: ["CMD-SHELL", "php -r 'exit(0);' && test -w /var/www/data"]
       interval: 15s
@@ -108,7 +96,6 @@ services:
       - data_volume:/var/www/data
       - storage_volume:/srv/storage
       - ${STORAGE_HOST_PATH:-./storage-root}:/srv/storage/local
-      - ${BACKUP_HOST_PATH:-./backups}:/backups
     depends_on:
       php:
         condition: service_healthy
@@ -119,108 +106,8 @@ services:
     pids_limit: 512
     networks: [ansnew]
 
-  ws:
-    build:
-      context: .
-      dockerfile: docker/ws/Dockerfile
-    image: ${IMAGE_WS:-ansnew/ws}
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      APP_ROLE: ws
-      WS_PORT: 3001
-      ANSNEW_DATA_DIR: /var/www/data
-      PHP_API_URL: http://nginx:8080
-    volumes:
-      - data_volume:/var/www/data:ro
-    depends_on:
-      php:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-    restart: unless-stopped
-    logging: *default-logging
-    mem_limit: 256m
-    cpus: "1.0"
-    pids_limit: 256
-    networks: [ansnew]
-
-  # --- NAS (SMB) option -----------------------------------------------------
-  # Opt-in network file share. Bring it up with `docker compose --profile nas up -d`
-  # (or set COMPOSE_PROFILES=nas in .env). It exposes the file manager's _inbox
-  # folder as a writable SMB share (TCP 445) so Windows "Map Network Drive" and
-  # mobile SMB apps can drop files straight in; nas-watch then imports them into
-  # the file manager at a rate-limited queue (see NAS_INGEST_MBPS).
-  nas:
-    build:
-      context: .
-      dockerfile: docker/nas/Dockerfile
-    image: ${IMAGE_NAS:-ansnew/nas}
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      NAS_SHARE_NAME: ${NAS_SHARE_NAME:-ansnew}
-      NAS_USER: ${NAS_USER:-ansnew}
-      NAS_PASS: ${NAS_PASS:-change-me}
-    volumes:
-      - ${STORAGE_HOST_PATH:-./storage-root}:/srv/storage/local
-    ports:
-      - "${NAS_PORT:-445}:445"
-    profiles: ["nas"]
-    restart: unless-stopped
-    networks: [ansnew]
-
-  # Watches _inbox and imports dropped files (encrypt-at-rest + 50 MB/s cap).
-  nas-watch:
-    build:
-      context: .
-      dockerfile: docker/php/Dockerfile
-    image: ${IMAGE_PHP:-ansnew/php}
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      APP_ENV: production
-      APP_ROLE: nas-watch
-    entrypoint: ["/entrypoint.sh", "php", "/var/www/app/bin/nas-watch.php"]
-    volumes:
-      - data_volume:/var/www/data
-      - ${STORAGE_HOST_PATH:-./storage-root}:/srv/storage/local
-    profiles: ["nas"]
-    restart: unless-stopped
-    networks: [ansnew]
-
-  db:
-    image: mariadb:11
-    profiles: ["mysql"]
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      MARIADB_ROOT_PASSWORD: ${DB_PASSWORD}
-      MARIADB_DATABASE: ${DB_NAME:-ansnew}
-      MARIADB_USER: ${DB_USER}
-      MARIADB_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - db_volume:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-    restart: unless-stopped
-    networks: [ansnew]
-
 volumes:
   data_volume:
-  db_volume:
   storage_volume:
 
 networks:

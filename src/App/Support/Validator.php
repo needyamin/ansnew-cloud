@@ -55,16 +55,17 @@ final class Validator
 
     public static function adapter(string $v): string
     {
-        $ok = ['local', 'ftp', 'ftps', 'sftp', 'smb', 'http', 's3'];
+        $ok = ['local', 's3'];
         if (!in_array($v, $ok, true)) {
             throw new InvalidArgumentException('Unknown adapter');
         }
         return $v;
     }
 
+    /** Remote-connection protocols. This build speaks S3-compatible storage only. */
     public static function protocol(string $v): string
     {
-        $ok = ['ftp', 'ftps', 'sftp', 'smb', 'http', 's3'];
+        $ok = ['s3'];
         if (!in_array($v, $ok, true)) {
             throw new InvalidArgumentException('Unknown protocol');
         }

@@ -1,9 +1,0 @@
-﻿{
-  "name": "ansnew-ws",
-  "version": "1.0.0",
-  "private": true,
-  "type": "commonjs",
-  "dependencies": {
-    "ws": "^8.17.0"
-  }
-}

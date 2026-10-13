@@ -1,4 +1,4 @@
-/* ANSNEW CLOUD design system — dark/light via CSS custom properties.
+/* ANSNEW CLOUD design system — single light theme via CSS custom properties.
  *
  * BREAKPOINTS (CSS custom properties can't be used inside @media, so these four
  * values are the contract — use them consistently, never ad-hoc numbers):
@@ -8,24 +8,16 @@
  *                       secondary topbar actions move into the overflow menu
  *   560px   --phone     dialogs become bottom sheets; tables scroll
  */
-:root, [data-theme="dark"] {
-  --bg: #0f1216; --bg2: #161b22; --bg3: #1d232c; --panel: #171c24;
-  --border: #2a313c; --border2: #39414e;
-  --text: #e6e9ee; --text2: #9aa3b2; --text3: #6b7686;
-  --accent: #4f8cff; --accent2: #3a6fd8; --ok: #3fb26f; --warn: #e0a63c; --err: #e05656;
-  --sel: rgba(79,140,255,.18); --hover: rgba(255,255,255,.05);
-  --shadow: 0 8px 28px rgba(0,0,0,.45); --radius: 8px;
-  /* Grid tile geometry. Read by FilesPane.measure() to compute the column
-     count in JS, which is what allows the grid to be windowed. */
-  --tile-h: 120px; --tile-min: 110px; --tile-gap: 4px;
-}
-[data-theme="light"] {
+:root {
   --bg: #f4f6f9; --bg2: #ffffff; --bg3: #eef1f5; --panel: #ffffff;
   --border: #d9dee6; --border2: #c3cbd6;
   --text: #1c2430; --text2: #5a6474; --text3: #8b94a3;
   --accent: #3574e0; --accent2: #2b5cba; --ok: #2e9e5b; --warn: #b97f14; --err: #cc4b4b;
   --sel: rgba(53,116,224,.14); --hover: rgba(0,0,0,.045);
-  --shadow: 0 8px 28px rgba(20,30,50,.16);
+  --shadow: 0 8px 28px rgba(20,30,50,.16); --radius: 8px;
+  /* Grid tile geometry. Read by FilesPane.measure() to compute the column
+     count in JS, which is what allows the grid to be windowed. */
+  --tile-h: 120px; --tile-min: 110px; --tile-gap: 4px;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -204,7 +196,7 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .fitem { border-radius: 6px; cursor: pointer; user-select: none; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 6px; text-align: center; border: 1px solid transparent; height: var(--tile-h); }
 .fitem:hover { background: var(--hover); }
 .fitem.selected { background: var(--sel); border-color: var(--accent); }
-/* One fixed-height box for both the type icon and the thumbnail, so every tile
+/* One fixed-height box for the type icon, so every tile
    is the same height and the row pitch is uniform. */
 .fitem .visual { width: 100%; height: 78px; display: grid; place-items: center; }
 .fitem .visual .ico { width: 42px; height: 42px; }
@@ -233,13 +225,6 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .dropzone-active { outline: 2px dashed var(--accent); outline-offset: -4px; background: var(--sel); }
 .empty-hint { color: var(--text3); text-align: center; padding: 40px 0; }
 
-/* ---------- thumbnails ---------- */
-.fitem .thumb {
-  width: 100%; height: 78px; display: block;
-  object-fit: cover; border-radius: 6px; background: var(--bg3);
-}
-/* A failed thumbnail hides itself and the tile falls back to the name only. */
-.fitem .thumb.thumb-failed { display: none; }
 
 /* ---------- details panel ---------- */
 /*aside.details = the right-hand metadata PANEL. Scoped to the element on
@@ -257,7 +242,6 @@ aside.details[hidden] { display: none; }
 .details-empty .ico { width: 28px; height: 28px; opacity: .6; }
 .details-head { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
 .details-head .details-ico { width: 60px; height: 60px; color: var(--text2); }
-.details-thumb { width: 100%; max-height: 180px; object-fit: contain; border-radius: 8px; background: var(--bg3); }
 .details-title { font-weight: 600; font-size: 14px; word-break: break-word; overflow-wrap: anywhere; }
 .details-rows { display: grid; grid-template-columns: 76px 1fr; gap: 5px 10px; margin: 0; font-size: 12.5px; }
 .details-rows dt { color: var(--text3); }
@@ -870,7 +854,6 @@ body.dltray-open .uploadtray { bottom: auto; top: 60px; }
 }
 .filelist.list .fitem .visual { width: 20px; height: 20px; flex-shrink: 0; }
 .filelist.list .fitem .visual .ico { width: 18px; height: 18px; }
-.filelist.list .fitem .visual .thumb { width: 20px; height: 20px; border-radius: 3px; }
 .filelist.list .fitem .nm { font-size: 13px; text-align: left; }
 .filelist.list .fitem .fav-mark { position: static; width: 13px; height: 13px; margin-left: -2px; }
 

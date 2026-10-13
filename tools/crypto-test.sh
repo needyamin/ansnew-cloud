@@ -21,7 +21,17 @@ check() { # label expected actual
 
 OUT=$(docker exec -i ansnew-cloud-php-1 php <<'PHP'
 <?php
-require '/var/www/app/vendor/autoload.php';
+spl_autoload_register(static function (string $class): void {
+    $prefix = 'App\\';
+    if (!str_starts_with($class, $prefix)) {
+        return;
+    }
+    $rel = str_replace('\\', '/', substr($class, strlen($prefix)));
+    $file = '/var/www/app/src/App/' . $rel . '.php';
+    if (is_file($file)) {
+        require $file;
+    }
+});
 use App\Config\Config;
 use App\Storage\Encryption\EncryptedFormat;
 use App\Storage\Encryption\FileCipher;

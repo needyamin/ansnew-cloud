@@ -1,4 +1,6 @@
--- ANSNEW CLOUD schema — SQLite dialect (default).
+-- ANSNEW CLOUD schema — SQLite dialect (the only one).
+-- Slimmed-down local-only file storage: no remote adapters, no websockets,
+-- no 2FA, no audit log, no backups/undo history, no NAS inbox.
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
@@ -9,13 +11,11 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash   TEXT    NOT NULL,
     role            TEXT    NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user')),
     display_name    TEXT    NOT NULL DEFAULT '',
-    theme           TEXT    NOT NULL DEFAULT 'dark',
+    theme           TEXT    NOT NULL DEFAULT 'light',
     locale          TEXT    NOT NULL DEFAULT 'en',
     home_mount_id   INTEGER REFERENCES mounts(id) ON DELETE SET NULL,
     is_active       INTEGER NOT NULL DEFAULT 1,
     must_change_pw  INTEGER NOT NULL DEFAULT 0,
-    failed_logins   INTEGER NOT NULL DEFAULT 0,
-    locked_until    TEXT,
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     last_login_at   TEXT
 );
@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(username,
 CREATE TABLE IF NOT EXISTS connections (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT NOT NULL UNIQUE,
-    protocol     TEXT NOT NULL CHECK (protocol IN ('ftp','ftps','sftp','smb','http','s3')),
+    protocol     TEXT NOT NULL CHECK (protocol IN ('s3')),
     host         TEXT NOT NULL,
     port         INTEGER NOT NULL,
     username     TEXT NOT NULL DEFAULT '',
@@ -40,8 +40,7 @@ CREATE TABLE IF NOT EXISTS connections (
     secret_enc   TEXT,                       -- AES-256-GCM ciphertext (never plaintext)
     passphrase_enc TEXT,                     -- private-key passphrase, encrypted
     remote_base  TEXT NOT NULL DEFAULT '/',
-    host_fingerprint TEXT,                   -- pinned SSH host key (TOFU)
-    extra        TEXT NOT NULL DEFAULT '{}', -- json: passive mode, tls opts, domain, share
+    extra        TEXT NOT NULL DEFAULT '{}', -- json: bucket, region, path_style
     verify_tls   INTEGER NOT NULL DEFAULT 1,
     created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
@@ -51,7 +50,7 @@ CREATE TABLE IF NOT EXISTS mounts (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     name           TEXT NOT NULL UNIQUE,   -- slug used by the API ("local", "nas")
     label          TEXT NOT NULL,
-    adapter        TEXT NOT NULL CHECK (adapter IN ('local','ftp','ftps','sftp','smb','http','s3')),
+    adapter        TEXT NOT NULL CHECK (adapter IN ('local','s3')),
     local_root     TEXT,                   -- for local adapter only
     connection_id  INTEGER REFERENCES connections(id) ON DELETE SET NULL,
     remote_path    TEXT NOT NULL DEFAULT '/',
@@ -103,6 +102,7 @@ CREATE TABLE IF NOT EXISTS favorites (
     mount      TEXT NOT NULL,
     path       TEXT NOT NULL,
     label      TEXT NOT NULL DEFAULT '',
+    type       TEXT NOT NULL DEFAULT 'file',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (user_id, mount, path)
 );
@@ -145,23 +145,6 @@ CREATE TABLE IF NOT EXISTS shares (
 CREATE INDEX IF NOT EXISTS idx_shares_user ON shares(user_id);
 CREATE INDEX IF NOT EXISTS idx_shares_lookup ON shares(token_hash);
 
-CREATE TABLE IF NOT EXISTS audit_log (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    username   TEXT NOT NULL DEFAULT '',
-    action     TEXT NOT NULL,
-    mount      TEXT,
-    path       TEXT,
-    target     TEXT,
-    status     TEXT NOT NULL DEFAULT 'ok',
-    detail     TEXT NOT NULL DEFAULT '',
-    ip         TEXT NOT NULL DEFAULT '',
-    user_agent TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id, created_at DESC);
-
 CREATE TABLE IF NOT EXISTS trash_items (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -180,15 +163,8 @@ CREATE TABLE IF NOT EXISTS rate_limits (
     updated_at  INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS ws_tickets (
-    id          TEXT PRIMARY KEY,
-    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    channel     TEXT NOT NULL DEFAULT 'events',
-    scope       TEXT NOT NULL DEFAULT '',
-    expires_at  INTEGER NOT NULL,
-    used        INTEGER NOT NULL DEFAULT 0
-);
-
+-- Key/value store. Holds short-lived download tokens (encrypted) and
+-- password-less access grants for password-protected public share pages.
 CREATE TABLE IF NOT EXISTS settings (
     k          TEXT PRIMARY KEY,
     v          TEXT NOT NULL,
@@ -199,56 +175,3 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     version    TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-
--- Full-drive backups. One row per backup run; the per-file manifest is written
--- as JSONL into the data directory (a whole drive does not belong in one row).
-CREATE TABLE IF NOT EXISTS backups (
-    id            TEXT PRIMARY KEY,             -- uuid v4
-    user_id       INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    source_mount  TEXT NOT NULL,                -- drive being backed up
-    source_path   TEXT NOT NULL DEFAULT '/',    -- subtree (default: the whole drive)
-    dest_mount    TEXT NOT NULL,                -- drive receiving the copy
-    dest_path     TEXT NOT NULL,                -- backup root folder
-    label         TEXT NOT NULL DEFAULT '',
-    status        TEXT NOT NULL DEFAULT 'queued'
-                  CHECK (status IN ('queued','running','paused','done','error','canceled','verifying','verified','verify-failed')),
-    job_id        TEXT,                         -- current/last job driving this run
-    phase         TEXT NOT NULL DEFAULT '',     -- scanning | copying | verifying | …
-    files_total   INTEGER NOT NULL DEFAULT 0,
-    files_done    INTEGER NOT NULL DEFAULT 0,
-    bytes_total   INTEGER NOT NULL DEFAULT 0,
-    bytes_done    INTEGER NOT NULL DEFAULT 0,
-    error         TEXT,
-    manifest      TEXT,                         -- path to the JSONL manifest
-    started_at    TEXT,
-    finished_at   TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_backups_user ON backups(user_id, created_at DESC);
-
--- File-operation history backing Undo/Redo. Each row stores enough to reverse
--- the operation; `undone` marks a step that has been rolled back (the redo side
--- of the stack). A new operation truncates that tail, like every editor.
-CREATE TABLE IF NOT EXISTS op_history (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    op          TEXT NOT NULL,                  -- move | copy | rename | delete | mkdir | restore
-    mount       TEXT NOT NULL DEFAULT '',
-    summary     TEXT NOT NULL DEFAULT '',
-    payload     TEXT NOT NULL DEFAULT '{}',     -- invertible operation detail (json)
-    undone      INTEGER NOT NULL DEFAULT 0,     -- 1 = rolled back and redoable
-    undone_at   TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_history_user ON op_history(user_id, id DESC);
-
--- Tracks files dropped into the NAS SMB inbox so the watcher imports each once.
-CREATE TABLE IF NOT EXISTS nas_inbox (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    path        TEXT NOT NULL,
-    size        INTEGER NOT NULL DEFAULT 0,
-    status      TEXT NOT NULL DEFAULT 'done',
-    imported_at INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(path)
-);
-CREATE INDEX IF NOT EXISTS idx_nas_inbox_status ON nas_inbox(status);

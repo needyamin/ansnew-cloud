@@ -88,7 +88,7 @@ run_job "extract  (demo.zip -> /out)"     /api/fs/local/extract         '{"path"
 run_job "copy     (/demo -> /)"           /api/fs/local/copy            '{"path":"/demo","destDir":"/","destMount":"local","conflict":"rename"}'
 run_job "move     (/moveme -> /out)"      /api/fs/local/move            '{"path":"/moveme","destDir":"/out","destMount":"local","conflict":"rename"}'
 run_job "du       (usage scan)"           /api/usage/local/scan         '{}'
-run_job "download-folder (/demo)"         /api/fs/local/download-folder '{"path":"/demo"}'
+run_job "download-selection (/demo)"      /api/fs/local/download-selection '{"paths":["/demo"],"name":"demo-sel.zip"}'
 run_job "delete   (/demo permanent)"      /api/fs/local/delete          '{"path":"/demo","permanent":true}'
 
 echo "== archive edge cases (regression) =="

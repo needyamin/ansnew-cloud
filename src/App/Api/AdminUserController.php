@@ -8,9 +8,7 @@ use App\Auth\Guard;
 use App\Auth\SessionManager;
 use App\Core\Request;
 use App\Core\Response;
-use App\Services\AuditService;
 use App\Services\UserService;
-use App\Support\PathGuard;
 use App\Support\Validator;
 use RuntimeException;
 
@@ -36,7 +34,6 @@ final class AdminUserController
             (string) ($body['displayName'] ?? ''),
             (string) ($body['email'] ?? '')
         );
-        AuditService::log($admin, 'admin.user_create', null, null, (string) ($body['username'] ?? ''), 'ok', '', $req->ip(), $req->userAgent());
         return Response::ok(['id' => $id]);
     }
 
@@ -64,7 +61,6 @@ final class AdminUserController
             default:
                 return Response::error('Unknown action', 400, 'bad_request');
         }
-        AuditService::log($admin, 'admin.user_update', null, null, (string) $id, 'ok', $action, $req->ip(), $req->userAgent());
         return Response::ok(['updated' => true]);
     }
 
@@ -72,7 +68,6 @@ final class AdminUserController
     {
         $admin = Guard::requireAdmin($session);
         UserService::delete($admin->id, $id);
-        AuditService::log($admin, 'admin.user_delete', null, null, (string) $id, 'ok', '', $req->ip(), $req->userAgent());
         return Response::ok(['deleted' => true]);
     }
 }

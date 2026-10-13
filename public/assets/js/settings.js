@@ -10,7 +10,6 @@ import { el, clear } from './util.js';
 import { api, invalidate } from './api.js';
 import { state } from './state.js';
 import { icon } from './icons.js';
-import { twoFactorDialog } from './twofactor.js';
 import { toastOk, toastErr } from './ui.js';
 
 /** Settings the server publishes in /api/bootstrap, for transparency. */
@@ -50,10 +49,8 @@ export async function renderSettings(container, { onChangePassword, onOpenView }
     'Your account security and the policy this installation enforces. Values shown here are read from the server.' }));
 
   let boot = null;
-  let twoFa = false;
   try {
     boot = (await api.get('/api/bootstrap', { cacheKey: 'bootstrap', ttl: 0 })).data;
-    twoFa = (await api.get('/api/auth/2fa', { cacheKey: '2fa', ttl: 0 })).enabled === true;
   } catch (e) { toastErr(e.message); }
   boot = boot || {};
 
@@ -61,11 +58,8 @@ export async function renderSettings(container, { onChangePassword, onOpenView }
 
   /* ---- account security ---- */
   page.appendChild(actionCard('Account security', 'shield',
-    twoFa
-      ? 'Two-factor authentication is ON. Signing in needs your password and a code from your authenticator app.'
-      : 'Two-factor authentication is OFF. Turning it on means a stolen password alone is not enough to open your files.',
+    'Your password is the only credential for this account — keep it long and unique.',
     [
-      [twoFa ? 'Manage two-factor' : 'Enable two-factor', () => twoFactorDialog()],
       ['Change password', () => onChangePassword && onChangePassword(false)],
     ]));
 
@@ -124,44 +118,8 @@ export async function renderSettings(container, { onChangePassword, onOpenView }
   if (isAdmin) {
     page.appendChild(card('Server (administrator)', 'shield', [
       ['Installation key', 'Per-install APP_KEY used for secrets and share tokens'],
-      ['Audit log', 'Every security-relevant action is recorded'],
       ['User & drive management', 'Administration section in the sidebar'],
-      ['Two-factor policy', 'Available to every account; users opt in'],
     ]));
-
-    /* ---- destructive-action protection ---- */
-    const gated = !!state.sensitive.gateDeleteTrash;
-    const gateInput = el('input', { type: 'checkbox' });
-    gateInput.checked = gated;
-    gateInput.addEventListener('change', async () => {
-      const on = gateInput.checked;
-      gateInput.disabled = true;
-      try {
-        await api.post('/api/admin/security/gate', { gateDeleteTrash: on });
-        state.sensitive.gateDeleteTrash = on;
-        toastOk(on ? 'Password now required to delete (even to trash).' : 'Delete-to-trash no longer requires a password.');
-      } catch (e) {
-        gateInput.checked = !on; // revert on failure
-        toastErr(e.message);
-      } finally {
-        gateInput.disabled = false;
-      }
-    });
-    page.appendChild(el('div', { class: 'settings-card' },
-      el('h3', {}, icon('shield', 'ico'), 'Destructive-action protection'),
-      el('div', { class: 'settings-card-body' },
-        el('p', { class: 'muted', text:
-          'Require the account password before high-impact actions — disconnecting a drive, deleting a connection, emptying the trash, clearing all favourites, and permanently deleting files. "Delete to trash" is covered by this switch; permanent deletes are always gated.' }),
-        el('label', { class: 'checkbox' }, gateInput,
-          el('span', { text: 'Require password to delete (even to trash)' })),
-      ),
-    ));
-
-    page.appendChild(actionCard('Danger zone', 'trash',
-      'These affect the whole installation and cannot be undone.',
-      [
-        ['Open audit log', () => onOpenView && onOpenView('admin-audit')],
-      ]));
   }
 
   container.appendChild(page);

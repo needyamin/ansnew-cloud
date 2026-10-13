@@ -54,10 +54,10 @@ final class Crypto
         return $plain;
     }
 
-    /** HMAC helper shared with the WS service (secrets never leave the server). */
+    /** HMAC helper (server-side only; never exposed to clients). */
     public static function hmac(string $data, string $purpose): string
     {
-        return hash_hmac('sha256', $purpose . ':' . $data, Config::i()->wsSecret());
+        return hash_hmac('sha256', $purpose . ':' . $data, Config::i()->appKey());
     }
 
     public static function constantTimeEquals(string $a, string $b): bool

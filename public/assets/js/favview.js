@@ -13,7 +13,6 @@ import { api, invalidate } from './api.js';
 import { state, setFavorites } from './state.js';
 import { icon } from './icons.js';
 import { toastOk, toastErr, confirmDialog } from './ui.js';
-import { withSensitive } from './sensitive.js';
 import { clearAllFavorites } from './fsops.js';
 
 function mountLabel(mount) {
@@ -135,12 +134,7 @@ export async function renderFavouritesView(container, { onOpen, onChanged } = {}
       { title: 'Remove all favourites', danger: true, okLabel: 'Remove all' },
     );
     if (!ok) return;
-    // Password gate: bulk and irreversible.
-    const res = await withSensitive('favorites.clear', async () => {
-      const r = await clearAllFavorites();
-      return r;
-    });
-    if (!res) return;
+    await clearAllFavorites();
     items = [];
     setFavorites([]);
     invalidate('favorites');

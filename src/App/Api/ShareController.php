@@ -8,7 +8,6 @@ use App\Auth\Guard;
 use App\Auth\SessionManager;
 use App\Core\Request;
 use App\Core\Response;
-use App\Services\AuditService;
 use App\Services\ShareService;
 use App\Support\PathGuard;
 use App\Support\Validator;
@@ -56,21 +55,13 @@ final class ShareController
     }
 
     /**
-     * Remove every share link the user owns at once.
-     *
-     * Gated behind a password re-entry (SensitiveGate scope `shares.clear`) because
-     * it is a bulk, irreversible teardown of access the user granted one link at a
-     * time — the same reasoning as clearing all favourites. There is no per-link undo.
+     * Remove every share link the user owns at once. Bulk and irreversible —
+     * there is no per-link undo.
      */
     public static function clearAll(Request $req, SessionManager $session): Response
     {
-        $gated = \App\Auth\SensitiveGate::guard($session, 'shares.clear');
-        if ($gated !== null) {
-            return $gated;
-        }
         $user = Guard::requireUser($session);
         $removed = ShareService::clearAll($user);
-        AuditService::log($user, 'share.revoke_all', null, null, null, 'ok', (string) $removed, '', '');
         return Response::ok(['removed' => $removed]);
     }
 
@@ -94,9 +85,16 @@ final class ShareController
                 'This share link is invalid, expired, or was revoked by its owner.', 404);
         }
 
-        $password = $_POST['password'] ?? ($req->query('password', '') ?? '');
-        if (ShareService::passwordRequired($share, is_string($password) ? $password : null)) {
-            return self::passwordPage($token);
+        // The password arrives by POST, never in the URL; once accepted, the
+        // visitor keeps an HttpOnly access-grant cookie for 12h so nothing
+        // sensitive ever lands in logs, referrers or browser history.
+        $grant = isset($_COOKIE['ansnew_sg']) ? (string) $_COOKIE['ansnew_sg'] : null;
+        $attempted = isset($_POST['password']) ? (string) $_POST['password'] : null;
+        if (ShareService::passwordRequired($share, $attempted, $grant)) {
+            return self::passwordPage($token, $attempted !== null);
+        }
+        if ($attempted !== null && $attempted !== '') {
+            ShareService::issueGrant($share);
         }
 
         ShareService::recordAccess((int) $share['id']);
@@ -111,7 +109,7 @@ final class ShareController
 
         $stat = $adapter->stat($target);
         if (($stat['type'] ?? '') === 'dir') {
-            return self::folderPage($token, $adapter, $target, $name, (string) $password);
+            return self::folderPage($token, $adapter, $target, $name);
         }
         return self::filePage($token, $stat, (string) $share['allow_download']);
     }
@@ -126,8 +124,9 @@ final class ShareController
         if (!(bool) $share['allow_download']) {
             return Response::error('Downloads are disabled for this link', 403, 'denied');
         }
-        $password = (string) ($req->query('password', '') ?? '');
-        if (ShareService::passwordRequired($share, $password !== '' ? $password : null)) {
+        $grant = isset($_COOKIE['ansnew_sg']) ? (string) $_COOKIE['ansnew_sg'] : null;
+        $attempted = isset($_POST['password']) ? (string) $_POST['password'] : null;
+        if (ShareService::passwordRequired($share, $attempted, $grant)) {
             return Response::error('This link is password protected', 401, 'password_required');
         }
 
@@ -186,16 +185,17 @@ final class ShareController
             . '<title>' . $esc($title) . '</title>'
             . '<style>'
             . 'body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;'
-            . 'background:#0f1115;color:#e6e8ec;display:flex;min-height:100vh;align-items:center;justify-content:center}'
-            . '.card{background:#171a21;border:1px solid #262b36;border-radius:12px;padding:28px;max-width:680px;width:92%}'
-            . 'h1{font-size:19px;margin:0 0 12px}.muted{color:#9aa3b2;font-size:14px;line-height:1.5}'
+            . 'background:#f4f6f9;color:#1c2333;display:flex;min-height:100vh;align-items:center;justify-content:center}'
+            . '.card{background:#ffffff;border:1px solid #e2e6ee;border-radius:12px;padding:28px;max-width:680px;width:92%;box-shadow:0 6px 24px rgba(28,35,51,.08)}'
+            . 'h1{font-size:19px;margin:0 0 12px}.muted{color:#5b6474;font-size:14px;line-height:1.5}'
+            . '.error{color:#b42318;font-size:14px;margin:4px 0}'
             . 'table{width:100%;border-collapse:collapse;margin-top:14px;font-size:14px}'
-            . 'td{padding:8px 6px;border-bottom:1px solid #232834}a{color:#7aa2ff;text-decoration:none}'
-            . 'a:hover{text-decoration:underline}.size{color:#9aa3b2;text-align:right;white-space:nowrap}'
-            . 'input{background:#0f1115;border:1px solid #2a3040;color:#e6e8ec;border-radius:8px;'
+            . 'td{padding:8px 6px;border-bottom:1px solid #edf0f5}a{color:#2563eb;text-decoration:none}'
+            . 'a:hover{text-decoration:underline}.size{color:#5b6474;text-align:right;white-space:nowrap}'
+            . 'input{background:#ffffff;border:1px solid #cfd6e2;color:#1c2333;border-radius:8px;'
             . 'padding:9px 10px;width:100%;font-size:14px;margin:10px 0}'
-            . 'button{background:#3b6ef5;color:#fff;border:0;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer}'
-            . '.crumbs{font-size:13px;margin-bottom:8px;color:#9aa3b2}'
+            . 'button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer}'
+            . '.crumbs{font-size:13px;margin-bottom:8px;color:#5b6474}'
             . '</style></head><body><div class="card">' . $inner . '</div></body></html>';
 
         // Note the argument order: Response takes (status, body).
@@ -205,18 +205,19 @@ final class ShareController
         return $resp;
     }
 
-    private static function passwordPage(string $token): Response
+    private static function passwordPage(string $token, bool $failed = false): Response
     {
         $t = htmlspecialchars($token, ENT_QUOTES, 'UTF-8');
         $inner = '<h1>This link is protected</h1>'
             . '<p class="muted">Enter the password the owner gave you.</p>'
-            . '<form method="get" action="/s/' . $t . '">'
+            . ($failed ? '<p class="error">Incorrect password. Try again.</p>' : '')
+            . '<form method="post" action="/s/' . $t . '">'
             . '<input type="password" name="password" placeholder="Password" autocomplete="off" required>'
             . '<button type="submit">Open</button></form>';
         return self::html('Protected share', $inner, 401);
     }
 
-    private static function folderPage(string $token, object $adapter, string $path, string $name, string $password): Response
+    private static function folderPage(string $token, object $adapter, string $path, string $name): Response
     {
         $esc = static fn (string $s): string => htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
         $enc = static fn (string $s): string => rawurlencode($s);
@@ -225,14 +226,12 @@ final class ShareController
         foreach ($adapter->list($path) as $entry) {
             $sub = $entry['path'];
             $subParam = $enc(ltrim(substr($sub, strlen(rtrim($path, '/'))), '/'));
-            $base = '/s/' . $enc($token) . '?path=' . $subParam
-                . ($password !== '' ? '&password=' . $enc($password) : '');
+            $base = '/s/' . $enc($token) . '?path=' . $subParam;
             if ($entry['type'] === 'dir') {
                 $rows .= '<tr><td>📁 <a href="' . $esc($base) . '">' . $esc($entry['name']) . '</a></td>'
                     . '<td class="size">—</td></tr>';
             } else {
-                $dl = '/s/' . $enc($token) . '/download?path=' . $subParam
-                    . ($password !== '' ? '&password=' . $enc($password) : '');
+                $dl = '/s/' . $enc($token) . '/download?path=' . $subParam;
                 $rows .= '<tr><td>📄 <a href="' . $esc($dl) . '">' . $esc($entry['name']) . '</a></td>'
                     . '<td class="size">' . $esc(self::humanSize((int) $entry['size'])) . '</td></tr>';
             }

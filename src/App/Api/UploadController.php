@@ -8,13 +8,7 @@ use App\Auth\Guard;
 use App\Auth\SessionManager;
 use App\Core\Request;
 use App\Core\Response;
-use App\Services\JobService;
-use App\Services\AuditService;
-use App\Services\FavoritesService;
-use App\Services\NotifyService;
 use App\Services\UploadService;
-use App\Support\PathGuard;
-use RuntimeException;
 
 /**
  * Upload endpoints: direct single-file upload + chunked uploads for large files.
@@ -37,8 +31,6 @@ final class UploadController
             }
         }
         $results = UploadService::handleUploadedFiles($user, $mount, $path, $req->files(), $conflict, $relPaths);
-        AuditService::log($user, 'fs.upload', $mount, $path, null, 'ok', count($results) . ' file(s)', $req->ip(), $req->userAgent());
-        NotifyService::fsChanged($user->id, [$mount => [$path]], 'upload');
         return Response::ok(['files' => $results]);
     }
 
@@ -55,8 +47,6 @@ final class UploadController
         $user = Guard::requireUser($session);
         $body = $req->json();
         $r = UploadService::complete($user, $mount, $body);
-        AuditService::log($user, 'fs.upload.chunked', $mount, $r['path'] ?? null, null, 'ok', '', $req->ip(), $req->userAgent());
-        NotifyService::fsChanged($user->id, [$mount => [(string) ($body['path'] ?? '/')]], 'upload');
         return Response::ok($r);
     }
 }

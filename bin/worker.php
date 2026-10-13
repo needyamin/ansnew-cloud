@@ -9,22 +9,33 @@ declare(strict_types=1);
 use App\Config\Config;
 use App\Jobs\Worker;
 use App\Services\DownloadService;
-use App\Services\ThumbnailService;
 use App\Services\TrashService;
 use App\Services\UploadService;
 
-require dirname(__DIR__) . '/vendor/autoload.php';
+// Zero-dependency autoloader (no composer required).
+spl_autoload_register(static function (string $class): void {
+    $prefix = 'App\\';
+    if (!str_starts_with($class, $prefix)) {
+        return;
+    }
+    $rel = str_replace('\\', '/', substr($class, strlen($prefix)));
+    $file = dirname(__DIR__) . '/src/App/' . $rel . '.php';
+    if (is_file($file)) {
+        require $file;
+    }
+});
 
 Config::i();
 
-// Occasional housekeeping thread via tick-like scheduling on the polling loop.
+// Occasional housekeeping via tick-like scheduling on the polling loop.
 $lastSweep = 0;
 
 $worker = new Worker();
 
-// Wrap the loop: run trash retention sweep every ~6h inside the same process.
-// (Worker::loop() never returns, so we install a periodic tick via pcntl_alarm
-// when available; otherwise the sweep piggybacks on the worker recycle.)
+// Wrap the loop: run the retention + staging sweeps every hour inside the same
+// process. (Worker::loop() never returns, so we install a periodic tick via
+// pcntl_alarm when available; otherwise the sweeps piggyback on the worker
+// recycle.)
 //
 // NOTE: job-lease renewal deliberately does NOT happen here. A signal handler
 // runs between arbitrary opcodes, so a DB write from it could land inside a
@@ -43,20 +54,12 @@ if (function_exists('pcntl_async_signals') && function_exists('pcntl_alarm')) {
         } catch (\Throwable $e) {
             error_log('[ansnew] trash sweep failed: ' . $e->getMessage());
         }
-        try {
-            $t = ThumbnailService::prune(14);
-            if ($t > 0) {
-                error_log("[ansnew] thumbnail cache pruned {$t} files");
-            }
-        } catch (\Throwable $e) {
-            error_log('[ansnew] thumbnail prune failed: ' . $e->getMessage());
-        }
         // Both of these hold PLAINTEXT copies of user data (decrypted download
         // archives, and upload chunks staged before assembly), so they must not
         // be allowed to accumulate. sweepTmp() was defined but never called, so
         // abandoned archives previously lived on disk forever.
         try {
-            $d = DownloadService::sweepTmp(21600);
+            $d = DownloadService::sweepTmp(3600);
             if ($d > 0) {
                 error_log("[ansnew] temp download archives swept {$d}");
             }
@@ -64,16 +67,16 @@ if (function_exists('pcntl_async_signals') && function_exists('pcntl_alarm')) {
             error_log('[ansnew] temp archive sweep failed: ' . $e->getMessage());
         }
         try {
-            $u = UploadService::sweepStaging(21600);
+            $u = UploadService::sweepStaging(3600);
             if ($u > 0) {
                 error_log("[ansnew] upload staging swept {$u}");
             }
         } catch (\Throwable $e) {
             error_log('[ansnew] upload staging sweep failed: ' . $e->getMessage());
         }
-        pcntl_alarm(21600); // 6 hours
+        pcntl_alarm(3600); // 1 hour
     });
-    pcntl_alarm(21600);
+    pcntl_alarm(3600);
 }
 
 $worker->loop();

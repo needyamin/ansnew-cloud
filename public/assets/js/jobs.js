@@ -2,14 +2,12 @@
 /*
  * Jobs drawer: live background job list with progress + cancel.
  *
- * Cards are keyed by job id and updated in place. The previous version did a
- * `clear()` + full rebuild of every card on each WebSocket tick, so a single
- * progress event (which fires up to twice a second per job) rebuilt the whole
- * drawer — and a 5 s poll did the same again.
+ * Cards are keyed by job id and updated in place. Progress is polled from
+ * /api/jobs (every 3 s) while at least one job is in flight — there is no
+ * WebSocket in this build, so the poll IS the live channel.
  */
 import { el, clear, fmtDate } from './util.js';
 import { api } from './api.js';
-import { on } from './realtime.js';
 import { toast } from './ui.js';
 
 let drawer = null;
@@ -21,13 +19,8 @@ const cards = new Map();
 const ACTIVE = new Set(['queued', 'running']);
 
 export function initJobs() {
-  on('job.progress', (d) => updateJob(d));
-  on('job.done', (d) => {
-    updateJob(d);
-    if (d && d.status === 'done') toast('Job finished: ' + (d.type || ''), 'ok');
-    if (d && d.status === 'error') toast('Job failed: ' + (d.message || d.type || ''), 'err');
-  });
-  on('notify', (d) => { if (d && d.message) toast(d.message, d.kind || 'info'); });
+  // No push channel in this build; the drawer polls while it is open and
+  // something is in flight. Toasts for finished jobs are raised by the poller.
 }
 
 export function openJobs() {
@@ -57,13 +50,13 @@ export function closeJobs() {
   document.body.classList.remove('jobdrawer-open');
 }
 
-/** Poll only while something is actually in flight — the push covers the rest. */
+/** Poll only while something is actually in flight. */
 function startPolling() {
   if (pollTimer) return;
   pollTimer = setInterval(() => {
     if (!hasActive()) return;
     refresh();
-  }, 5000);
+  }, 3000);
 }
 
 function stopPolling() {
@@ -97,8 +90,15 @@ function render(jobs) {
   jobs.forEach((j, i) => {
     seen.add(j.id);
     let c = cards.get(j.id);
+    const isNew = !c;
     if (!c) { c = createCard(j); cards.set(j.id, c); }
     updateCard(c, j);
+    // Toast once when a job reaches a terminal state (poll = the only channel).
+    if (!isNew && c.status !== 'queued' && c.status !== 'running' && !c.toasted) {
+      c.toasted = true;
+      if (c.status === 'done') toast('Job finished: ' + (j.type || ''), 'ok');
+      if (c.status === 'error') toast('Job failed: ' + (j.message || j.type || ''), 'err');
+    }
     // Keep the DOM order aligned with the server's newest-first ordering.
     if (listNode.children[i] !== c.card) listNode.insertBefore(c.card, listNode.children[i] || null);
   });
@@ -132,7 +132,7 @@ function createCard(j) {
     actions,
   );
   // `status` holds the state string; `statusEl` is the DOM node showing it.
-  return { card, bar, statusEl, msg, actions, status: j.status || 'queued', rendered: null };
+  return { card, bar, statusEl, msg, actions, status: j.status || 'queued', rendered: null, toasted: ACTIVE.has(j.status) ? false : true };
 }
 
 function updateCard(c, j) {
@@ -148,12 +148,4 @@ function updateCard(c, j) {
   const text = j.message || '';
   if (c.msg.textContent !== text) c.msg.textContent = text;
   c.actions.hidden = !ACTIVE.has(st);
-}
-
-function updateJob(d) {
-  if (!drawer || !d || !d.id) return;
-  const c = cards.get(d.id);
-  // A job we haven't listed yet (e.g. just enqueued) needs a full refresh.
-  if (!c) { refresh(); return; }
-  updateCard(c, d);
 }

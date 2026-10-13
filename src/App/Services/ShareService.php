@@ -29,6 +29,9 @@ final class ShareService
     /** Token entropy in bytes → 43 base64url characters. */
     private const TOKEN_BYTES = 32;
 
+    /** Cookie holding the post-password access grant for public share pages. */
+    private const GRANT_COOKIE = 'ansnew_sg';
+
     /** How long a link may live, in days, regardless of what was asked for. */
     private const MAX_EXPIRY_DAYS = 365;
 
@@ -78,8 +81,8 @@ final class ShareService
             : true;
 
         $password = (string) ($opts['password'] ?? '');
-        if ($password !== '' && strlen($password) < 4) {
-            throw new InvalidArgumentException('A share password must be at least 4 characters');
+        if ($password !== '' && strlen($password) < 6) {
+            throw new InvalidArgumentException('A share password must be at least 6 characters');
         }
 
         $token = self::mintToken();
@@ -103,7 +106,6 @@ final class ShareService
         );
         $id = (int) $db->scalar('SELECT id FROM shares WHERE token_hash = :h', [':h' => self::hashToken($token)]);
 
-        AuditService::log($user, 'share.create', $mount, $norm, null, 'ok', $isDir ? 'folder' : 'file', '', '');
         return [
             'id' => $id,
             'token' => $token,          // shown once in the response; hashed at rest
@@ -121,7 +123,6 @@ final class ShareService
     {
         $share = self::ownedShare($user, $id);
         Database::i()->run('DELETE FROM shares WHERE id = :id', [':id' => $id]);
-        AuditService::log($user, 'share.revoke', $share['mount'], $share['path'], null, 'ok', '', '', '');
     }
 
     /**
@@ -147,7 +148,6 @@ final class ShareService
             'UPDATE shares SET token_hash = :h, token_enc = :e, access_count = 0 WHERE id = :id',
             [':h' => self::hashToken($token), ':e' => Crypto::encrypt($token), ':id' => $id]
         );
-        AuditService::log($user, 'share.rotate', $share['mount'], $share['path'], null, 'ok', '', '', '');
         return ['id' => $id, 'token' => $token];
     }
 
@@ -178,16 +178,82 @@ final class ShareService
         return $row;
     }
 
-    /** True when the share is password-protected and the given password is wrong. */
-    public static function passwordRequired(array $share, ?string $provided): bool
+    /**
+     * True when the share is password-protected and the visitor has not
+     * proven access — neither by submitting the password in this request
+     * nor by holding a valid access grant cookie.
+     */
+    public static function passwordRequired(array $share, ?string $provided, ?string $grant = null): bool
     {
         if ($share['password_hash'] === null || $share['password_hash'] === '') {
+            return false;
+        }
+        if ($grant !== null && self::grantValid($share, $grant)) {
             return false;
         }
         if ($provided === null || $provided === '') {
             return true;
         }
         return !password_verify($provided, (string) $share['password_hash']);
+    }
+
+    /**
+     * Issue an access grant after a correct password entry, so the password
+     * never has to appear again in a URL (logs, referrers, history). The
+     * grant is an opaque random token; the DB key is its SHA-256 and the
+     * row is bound to the share id + APP_KEY signature. HttpOnly cookie.
+     */
+    public static function issueGrant(array $share): void
+    {
+        $token = bin2hex(random_bytes(24));
+        $payload = json_encode([
+            'share' => (int) $share['id'],
+            'sig' => hash_hmac('sha256', 'share-grant:' . (int) $share['id'], self::grantKey()),
+            'at' => time(),
+        ], JSON_THROW_ON_ERROR);
+        $db = Database::i();
+        $db->run(
+            'INSERT INTO settings (k, v) VALUES (:k, :v)
+             ON CONFLICT(k) DO UPDATE SET v = excluded.v',
+            [':k' => 'share_grant:' . hash('sha256', $token), ':v' => $payload]
+        );
+        // Housekeeping: drop grants older than 24h.
+        $db->run("DELETE FROM settings WHERE k LIKE 'share_grant:%' AND CAST(json_extract(v, '$.at') AS INTEGER) < :c", [':c' => time() - 86400]);
+        setcookie(self::GRANT_COOKIE, $token, [
+            'expires' => time() + 43200,
+            'path' => '/',
+            'httponly' => true,
+            'samesite' => 'Lax',
+            'secure' => (\App\Config\Config::i()->get('SESSION_SECURE_COOKIE', 'false') === 'true'),
+        ]);
+    }
+
+    private static function grantValid(array $share, string $grant): bool
+    {
+        if (strlen($grant) !== 48) {
+            return false;
+        }
+        $row = Database::i()->one(
+            'SELECT v FROM settings WHERE k = :k',
+            [':k' => 'share_grant:' . hash('sha256', $grant)]
+        );
+        if ($row === null) {
+            return false;
+        }
+        $data = json_decode((string) $row['v'], true);
+        if (!is_array($data) || (int) ($data['share'] ?? 0) !== (int) $share['id']) {
+            return false;
+        }
+        $expected = hash_hmac('sha256', 'share-grant:' . (int) $share['id'], self::grantKey());
+        if (!is_string($data['sig'] ?? null) || !hash_equals($expected, (string) $data['sig'])) {
+            return false;
+        }
+        return (int) ($data['at'] ?? 0) > time() - 43200;
+    }
+
+    private static function grantKey(): string
+    {
+        return (string) \App\Config\Config::i()->get('APP_KEY', 'ansnew-share-grant');
     }
 
     public static function recordAccess(int $id): void

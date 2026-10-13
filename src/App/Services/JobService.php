@@ -7,13 +7,12 @@ namespace App\Services;
 use App\Auth\Tickets;
 use App\Core\Database;
 use App\Jobs\JobHandler;
-use App\Support\PathGuard;
 use RuntimeException;
 use Throwable;
 
 /**
  * Background job queue. Jobs are claimed transactionally by bin/worker.php;
- * progress is persisted and fanned out through the WS server.
+ * progress is persisted in the jobs row and polled by the SPA.
  */
 final class JobService
 {
@@ -237,7 +236,6 @@ final class JobService
             $params[':r'] = json_encode($meta, JSON_UNESCAPED_UNICODE) ?: '{}';
         }
         Database::i()->run($sql, $params);
-        self::pushProgress($jobId);
     }
 
     public static function finish(string $jobId, array $result = [], string $message = 'Done'): void
@@ -248,7 +246,6 @@ final class JobService
                     lease_expires_at = NULL, finished_at = datetime('now') WHERE id = :id",
             [':r' => json_encode($result, JSON_UNESCAPED_UNICODE) ?: '{}', ':m' => $message, ':id' => $jobId]
         );
-        self::pushProgress($jobId);
     }
 
     public static function fail(string $jobId, string $message): void
@@ -259,7 +256,6 @@ final class JobService
                     finished_at = datetime('now') WHERE id = :id",
             [':m' => substr($message, 0, 500), ':id' => $jobId]
         );
-        self::pushProgress($jobId);
     }
 
     public static function cancel(string $jobId, int $userId): void
@@ -280,7 +276,6 @@ final class JobService
              WHERE id = :id",
             [':id' => $jobId]
         );
-        self::pushProgress($jobId);
     }
 
     public static function isCanceled(string $jobId): bool
@@ -299,69 +294,4 @@ final class JobService
         );
     }
 
-    /**
-     * Notify the WS server about a job's state.
-     *
-     * `result` is included deliberately: it carries the one-shot download token
-     * for download-folder jobs, which lets the client act on the push instead of
-     * polling /api/jobs every 1.2 s for the lifetime of the job.
-     */
-    private static function pushProgress(string $jobId): void
-    {
-        try {
-            $row = Database::i()->one(
-                'SELECT id, user_id, type, status, progress, message, result FROM jobs WHERE id = :id',
-                [':id' => $jobId]
-            );
-            if ($row === null) {
-                return;
-            }
-            // result is a JSON column; the client expects an object.
-            if (isset($row['result']) && is_string($row['result'])) {
-                $decoded = json_decode($row['result'], true);
-                $row['result'] = is_array($decoded) ? $decoded : null;
-            }
-            NotifyService::push([(int) $row['user_id']], 'job.progress', $row);
-        } catch (Throwable $e) {
-            // Non-fatal: polling still works.
-        }
-    }
-
-    /**
-     * Tell every open pane which directories a finished job touched, so it can
-     * revalidate just those instead of refetching whatever happens to be open.
-     *
-     * @param array<string,mixed> $params the job's stored params
-     */
-    public static function notifyFsChange(int $userId, string $type, array $params): void
-    {
-        $mount = (string) ($params['mount'] ?? '');
-        if ($mount === '') {
-            return;
-        }
-        $path = (string) ($params['path'] ?? '/');
-        $destDir = (string) ($params['destDir'] ?? '');
-        $destMount = (string) ($params['destMount'] ?? $mount);
-
-        $map = [];
-        switch ($type) {
-            case 'delete':
-                $map[$mount] = [PathGuard::dirname($path), $path];
-                break;
-            case 'move':
-            case 'copy':
-                $map[$mount] = [PathGuard::dirname($path)];
-                if ($destDir !== '') {
-                    $map[$destMount] = array_merge($map[$destMount] ?? [], [$destDir]);
-                }
-                break;
-            case 'archive':
-            case 'extract':
-                $map[$mount] = [$destDir !== '' ? $destDir : '/'];
-                break;
-            default:
-                return;
-        }
-        NotifyService::fsChanged($userId, $map, 'job:' . $type);
-    }
 }

@@ -19,14 +19,13 @@
  */
 import { el, clear, fmtSize } from './util.js';
 import { api } from './api.js';
-import { on } from './realtime.js';
 import { icon } from './icons.js';
 import { toast, toastErr, toastWarn, confirmDialog } from './ui.js';
 import { downloadUrl } from './fsops.js';
 
 /** @type {Map<string, object>} id -> transfer */
 const transfers = new Map();
-/** Job ids this client started, so another tab's push doesn't trigger a save. */
+/** Job ids this client started, so another tab's job doesn't trigger a save. */
 const ownedJobs = new Set();
 /** jobId -> pending transfer id (packing phase) */
 const jobToTransfer = new Map();
@@ -34,6 +33,7 @@ const jobToTransfer = new Map();
 let seq = 0;
 let tray = null;
 let listNode = null;
+let dlPoll = null;
 
 /* -------------------------------------------------------------------- tray */
 
@@ -282,47 +282,62 @@ export async function downloadSelection(mount, paths, name = '') {
   return t;
 }
 
-/** Wire job progress -> tray, and start the transfer when packing finishes. */
+/**
+ * Watch packing jobs by polling /api/jobs (there is no push channel in this
+ * build). The poll only runs while at least one transfer is in the packing
+ * phase, and it stops entirely once nothing is in flight.
+ */
 export function initDownloads() {
-  on('job.progress', (d) => {
-    if (!d || !d.id) return;
-    const id = jobToTransfer.get(d.id);
-    if (!id) return;
-    const t = transfers.get(id);
-    if (!t) { jobToTransfer.delete(d.id); return; }
+  if (dlPoll) return;
+  dlPoll = setInterval(() => {
+    if (!transfers.size) { clearInterval(dlPoll); dlPoll = null; return; }
+    let packing = false;
+    for (const t of transfers.values()) if (t.state === 'packing') { packing = true; break; }
+    if (!packing) return;
+    api.get('/api/jobs?limit=50')
+      .then(({ jobs }) => { for (const d of jobs || []) handleJobProgress(d); })
+      .catch(() => { /* the next tick retries */ });
+  }, 3000);
+}
 
-    if (d.status === 'canceled' || d.status === 'error') {
-      update(t, { state: d.status === 'canceled' ? 'canceled' : 'error', error: d.message || null });
-      jobToTransfer.delete(d.id);
-      ownedJobs.delete(d.id);
-      return;
-    }
-    const m = d.result || {};
-    if (m.bytesTotal) {
-      update(t, {
-        loaded: m.bytesDone || 0,
-        total: m.bytesTotal,
-        speed: m.speed || 0,
-        eta: m.etaSeconds ?? null,
-      });
-    }
-    if (d.status === 'done') {
-      const token = d.result && d.result.token;
-      const mine = ownedTransfer(t);
-      jobToTransfer.delete(d.id);
-      ownedJobs.delete(d.id);
-      if (!token) { update(t, { state: 'error', error: 'The archive was not produced' }); return; }
-      // Another tab asked for this one; it owns the save dialog.
-      if (!mine) { transfers.delete(t.id); render(); return; }
-      t.state = 'active';
-      t.url = `/api/download/${encodeURIComponent(token)}`;
-      t.name = (d.result && d.result.name) || t.name;
-      t.loaded = 0;
-      t.total = (d.result && d.result.size) || 0;
-      // Replace the record with a live transfer over the finished archive.
-      startTransferWith(t);
-    }
-  });
+function handleJobProgress(d) {
+  if (!d || !d.id) return;
+  const id = jobToTransfer.get(d.id);
+  if (!id) return;
+  const t = transfers.get(id);
+  if (!t) { jobToTransfer.delete(d.id); return; }
+
+  if (d.status === 'canceled' || d.status === 'error') {
+    update(t, { state: d.status === 'canceled' ? 'canceled' : 'error', error: d.message || null });
+    jobToTransfer.delete(d.id);
+    ownedJobs.delete(d.id);
+    return;
+  }
+  const m = d.result || {};
+  if (m.bytesTotal) {
+    update(t, {
+      loaded: m.bytesDone || 0,
+      total: m.bytesTotal,
+      speed: m.speed || 0,
+      eta: m.etaSeconds ?? null,
+    });
+  }
+  if (d.status === 'done') {
+    const token = d.result && d.result.token;
+    const mine = ownedTransfer(t);
+    jobToTransfer.delete(d.id);
+    ownedJobs.delete(d.id);
+    if (!token) { update(t, { state: 'error', error: 'The archive was not produced' }); return; }
+    // Another tab asked for this one; it owns the save dialog.
+    if (!mine) { transfers.delete(t.id); render(); return; }
+    t.state = 'active';
+    t.url = `/api/download/${encodeURIComponent(token)}`;
+    t.name = (d.result && d.result.name) || t.name;
+    t.loaded = 0;
+    t.total = (d.result && d.result.size) || 0;
+    // Replace the record with a live transfer over the finished archive.
+    startTransferWith(t);
+  }
 }
 
 /** Only the tab that asked for the download should pop a save dialog. */

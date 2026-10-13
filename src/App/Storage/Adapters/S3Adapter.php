@@ -50,7 +50,11 @@ final class S3Adapter implements StorageAdapter
             $host = (string) ($parts['host'] ?? '');
             $port = isset($parts['port']) ? (int) $parts['port'] : null;
         } else {
-            $scheme = 'https';
+            // Bare host: honour the connection's TLS setting. AWS/R2 are https
+            // with verifyTls=true; a LAN MinIO or test endpoint is plain http
+            // with verifyTls=false, and forcing https there produces the
+            // classic "wrong version number" TLS error against a plain socket.
+            $scheme = $cfg->verifyTls ? 'https' : 'http';
             $port = $cfg->port > 0 ? $cfg->port : null;
         }
         // Never carry a scheme's DEFAULT port into the endpoint. curl omits the

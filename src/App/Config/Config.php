@@ -51,33 +51,27 @@ final class Config
         // here — $this->values is populated only from this list, so an unlisted
         // key silently reads as '' and falls back to its default.
         foreach ([
-            'APP_URL', 'APP_ENV', 'DB_DRIVER', 'DB_DATABASE', 'DB_HOST', 'DB_PORT',
-            'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'SESSION_LIFETIME', 'IDLE_TIMEOUT',
-            'UPLOAD_MAX_BYTES', 'CHUNK_SIZE', 'UPLOAD_TMP_DIR', 'RATE_LIMIT_REQUESTS',
-            'RATE_LIMIT_WINDOW', 'LOGIN_MAX_ATTEMPTS', 'LOGIN_LOCKOUT_BASE',
-            'LOGIN_LOCKOUT_MAX', 'TRASH_ENABLED', 'TRASH_RETENTION_DAYS',
-            'SSRF_ALLOW_PRIVATE', 'SSRF_ALLOWLIST', 'WS_INTERNAL_URL', 'SESSION_SECURE_COOKIE',
-            // Asset rate-limit bucket, sensitive-action TTL and NAS ingest cap.
-            // These were read by code but missing here, so the env value was
-            // silently ignored and the hardcoded default always won.
-            'RATE_LIMIT_ASSET_REQUESTS', 'SENSITIVE_GRANT_TTL', 'NAS_INGEST_MBPS',
-            // Job queue recovery + trusted-proxy handling (see JobService, Request).
-            'JOB_LEASE_SECONDS', 'JOB_MAX_ATTEMPTS', 'TRUST_PROXY',
-            // How long to coalesce usage re-scans after a mutation (UsageService).
-            'USAGE_RESCAN_DEBOUNCE',
+            'APP_URL', 'APP_ENV', 'DB_DATABASE', 'APP_VERSION',
+            'SESSION_LIFETIME', 'IDLE_TIMEOUT', 'SESSION_SECURE_COOKIE',
+            'UPLOAD_MAX_BYTES', 'CHUNK_SIZE', 'UPLOAD_TMP_DIR',
             // Largest file the built-in text/code editor will open or save.
             'EDIT_MAX_BYTES',
+            'RATE_LIMIT_REQUESTS', 'RATE_LIMIT_WINDOW',
+            'LOGIN_MAX_ATTEMPTS', 'LOGIN_LOCKOUT_BASE', 'LOGIN_LOCKOUT_MAX',
+            'TRASH_ENABLED', 'TRASH_RETENTION_DAYS',
+            // Job queue recovery + trusted-proxy handling (see JobService, Request).
+            'JOB_LEASE_SECONDS', 'JOB_MAX_ATTEMPTS', 'TRUST_PROXY',
+            // Outbound remote-connection target policy (see Support/SsrfGuard).
+            'SSRF_ALLOW_PRIVATE', 'SSRF_ALLOWLIST',
+            // How long to coalesce usage re-scans after a mutation (UsageService).
+            'USAGE_RESCAN_DEBOUNCE',
             // Bootstrap admin (first boot only — see bin/console.php ansnew:bootstrap-admin).
             'ADMIN_USER', 'ADMIN_PASSWORD', 'ADMIN_EMAIL',
             // Master keys / shared secret.
-            'APP_KEY', 'ANSNEW_FILE_KEY', 'ANSNEW_FILE_KEY_ID', 'WS_SECRET',
+            'APP_KEY', 'ANSNEW_FILE_KEY', 'ANSNEW_FILE_KEY_ID',
             // Storage + encryption behaviour.
             'DEFAULT_MOUNT_PATH', 'DEFAULT_MOUNT_LABEL', 'ANSNEW_ENCRYPT_LOCAL',
             'ANSNEW_DATA_DIR', 'ANSNEW_STORAGE_ROOT', 'PASSWORD_MIN_LENGTH',
-            // Drive health / backup behaviour.
-            'ANSNEW_SMART_ENABLED', 'ANSNEW_BACKUP_DIR',
-            // Deployment-visible build marker (BootstrapController).
-            'APP_VERSION',
         ] as $key) {
             $val = getenv($key);
             if ($val !== false) {
@@ -122,20 +116,6 @@ final class Config
     }
 
     /**
-     * Where backup manifests live. The manifest is metadata (path, size, mtime)
-     * — the copied data itself always lands on a drive the user chose.
-     */
-    public function backupsDir(): string
-    {
-        $dir = $this->get('ANSNEW_BACKUP_DIR');
-        $dir = $dir !== '' ? $dir : $this->dataDir() . '/backups';
-        if (!is_dir($dir)) {
-            @mkdir($dir, 0770, true);
-        }
-        return $dir;
-    }
-
-    /**
      * Master AES key for stored secrets (hex, 64 chars).
      * Reads data/keys/app.key, creating it on first use. Cached per process —
      * this used to re-read and re-validate the file on every single call.
@@ -155,9 +135,9 @@ final class Config
     /**
      * Master AES key for file-content encryption (hex, 64 chars).
      *
-     * Deliberately separate from APP_KEY: that one protects remote-connection
-     * secrets and has a different rotation/escrow lifecycle. Separation limits
-     * the blast radius of losing either key.
+     * Deliberately separate from APP_KEY: that one protects stored secrets and
+     * has a different rotation/escrow lifecycle. Separation limits the blast
+     * radius of losing either key.
      */
     public function fileKey(): string
     {
@@ -210,30 +190,5 @@ final class Config
         file_put_contents($file, $key . "\n");
         @chmod($file, $mode);
         return $key;
-    }
-
-    public function wsSecret(): string
-    {
-        $env = $this->get('WS_SECRET');
-        if ($env !== '') {
-            return $env;
-        }
-        $file = $this->dataDir . '/keys/ws.secret';
-        if (is_readable($file)) {
-            $s = trim((string) file_get_contents($file));
-            if ($s !== '') {
-                return $s;
-            }
-        }
-        if (!is_dir(dirname($file))) {
-            @mkdir(dirname($file), 0770, true);
-        }
-        $s = bin2hex(random_bytes(32));
-        file_put_contents($file, $s . "\n");
-        // 0644: the ws container (node, UID 82) mounts this data volume
-        // read-only and must read this secret; the volume never leaves the
-        // trusted app containers (nginx blocks /data/).
-        @chmod($file, 0644);
-        return $s;
     }
 }

@@ -57,9 +57,11 @@ final class UserService
         return (int) $db->scalar('SELECT id FROM users WHERE username = :u', [':u' => $username]);
     }
 
-    public static function updatePassword(int $userId, string $newPassword): void
+    public static function updatePassword(int $userId, string $newPassword, bool $enforcePasswordPolicy = true): void
     {
-        Validator::password($newPassword);
+        if ($enforcePasswordPolicy) {
+            Validator::password($newPassword);
+        }
         $hash = password_hash($newPassword, PASSWORD_BCRYPT, ['cost' => 12]);
         Database::i()->run(
             'UPDATE users SET password_hash = :p, must_change_pw = 0 WHERE id = :id',
@@ -77,7 +79,7 @@ final class UserService
             if (array_key_exists($key, $fields)) {
                 $v = (string) $fields[$key];
                 if ($col === 'theme') {
-                    $v = in_array($v, ['dark', 'light'], true) ? $v : 'dark';
+                    $v = in_array($v, ['dark', 'light'], true) ? $v : 'light';
                 }
                 if (mb_strlen($v) > 190) {
                     throw new InvalidArgumentException('Field too long');

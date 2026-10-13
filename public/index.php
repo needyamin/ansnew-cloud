@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 /**
  * ANSNEW CLOUD sole PHP entry point (nginx always routes here).
+ *
+ * Zero external dependencies: App\ classes are resolved by a small built-in
+ * PSR-4 autoloader, so no composer install step is required to run the app.
  */
 
 use App\Api\Routes;
@@ -13,7 +16,17 @@ use App\Core\Kernel;
 use App\Core\Request;
 use App\Core\Router;
 
-require dirname(__DIR__) . '/vendor/autoload.php';
+spl_autoload_register(static function (string $class): void {
+    $prefix = 'App\\';
+    if (!str_starts_with($class, $prefix)) {
+        return;
+    }
+    $rel = str_replace('\\', '/', substr($class, strlen($prefix)));
+    $file = dirname(__DIR__) . '/src/App/' . $rel . '.php';
+    if (is_file($file)) {
+        require $file;
+    }
+});
 
 Config::i();
 

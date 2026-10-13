@@ -53,19 +53,9 @@ final class FavoritesController
 
     /**
      * Clear every favourite at once — the "unpin everything" button.
-     *
-     * Gated behind a password re-entry because it is a bulk, irreversible
-     * change to state the user built up one click at a time. There is no
-     * per-item undo, so the confirmation is the only thing standing between a
-     * stray click and losing the whole list.
      */
     public static function clearAll(Request $req, SessionManager $session): Response
     {
-        $gated = \App\Auth\SensitiveGate::guard($session, 'favorites.clear');
-        if ($gated !== null) {
-            return $gated;
-        }
-
         $user = Guard::requireUser($session);
         $removed = FavoritesService::clearFavorites($user);
         return Response::ok(['removed' => $removed]);

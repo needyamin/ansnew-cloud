@@ -10,7 +10,7 @@ import { el, clear, fmtSize, fmtDate } from './util.js';
 import { api, setCsrf, clearCache, invalidate, invalidateList } from './api.js';
 import {
   state, saveSession, setTheme, setFavorites, isFavorite,
-  setSidebarCollapsed, setSensitivePolicy, setColumn,
+  setSidebarCollapsed, setColumn,
 } from './state.js';
 import { loadSprite, icon } from './icons.js';
 import { toast, toastOk, toastErr, toastWarn, dialog, confirmDialog, promptDialog } from './ui.js';
@@ -18,7 +18,6 @@ import { FilesPane } from './filespane.js';
 import { isTextEntry } from './editor.js';
 import { DetailsPanel } from './details.js';
 import { initJobs, openJobs, closeJobs } from './jobs.js';
-import * as rt from './realtime.js';
 import {
   fsMkdir, fsCreateFile, fsRename, fsArchive, fsExtract,
   fsDeleteBatch, fsMoveBatch, fsCopyBatch,
@@ -27,24 +26,14 @@ import {
 } from './fsops.js';
 import { runUploadsWithUI } from './uploadtray.js';
 import { abortAllUploads } from './upload.js';
-import { runOp, joinPath, dirOf, syntheticEntry, reportBatch, resolveJob } from './mutation.js';
-import { initFsWatch } from './fswatch.js';
-import { renderDrivesView } from './drives.js';
-import { renderThisPcView, loadDrives, propertiesDialog } from './thispc.js';
-import { renderBackupsView, backupDialog } from './backup.js';
-import {
-  recordOp, refreshHistory, undoStep, redoStep, historyLabel, clearHistory,
-} from './history.js';
+import { runOp, joinPath, dirOf, syntheticEntry, reportBatch } from './mutation.js';
 import {
   initDownloads, openTray, downloadSelection, downloadEntriesWithProgress,
 } from './downloads.js';
-import { twoFactorDialog } from './twofactor.js';
 import { shareDialog, renderSharesView } from './sharing.js';
 import { renderSettings } from './settings.js';
-import { withSensitive, ensureSensitive, isGated, resetGrants } from './sensitive.js';
 import { renderFavouritesView } from './favview.js';
 import { bulkRenameDialog } from './bulkrename.js';
-import { duplicatesDialog } from './duplicates.js';
 import { clearAllFavorites } from './fsops.js';
 
 const root = document.getElementById('app');
@@ -52,7 +41,7 @@ const root = document.getElementById('app');
 let pane = null;          // primary FilesPane
 let pane2 = null;         // secondary pane (split view)
 let details = null;       // metadata side panel
-let view = 'files';       // files | trash | admin-users | admin-mounts | admin-connections | admin-audit
+let view = 'files';       // files | trash | recent | favourites | shares | settings | admin-users | admin-mounts
 let menuNode = null;      // open context menu
 let shellNodes = {};      // cached shell DOM refs
 let uploadInput = null;
@@ -183,14 +172,11 @@ function tableWrap(table) {
 /* ==================================================================== boot */
 
 (async function boot() {
-  setTheme(localStorage.getItem('ansnew.theme') || 'dark', false);
+  setTheme(localStorage.getItem('ansnew.theme') || 'light', false);
   await loadSprite();
   try {
     const b = await api.get('/api/bootstrap');
     setCsrf(b.csrf);
-    // Which destructive actions need a password, and for how long one
-    // confirmation lasts. Published by the server so the UI never hardcodes it.
-    setSensitivePolicy(b.sensitive);
     if (b.authenticated) {
       saveSession(b.user, b.csrf);
       startApp();
@@ -224,11 +210,6 @@ function renderLogin() {
     try {
       const r = await api.post('/api/auth/login', { username: user.value.trim(), password: pass.value });
       setCsrf(r.csrf);
-      if (r.twoFactorRequired) {
-        // The password alone must not reach the app: ask for the second factor.
-        showTwoFactorStep();
-        return;
-      }
       saveSession(r.user, r.csrf);
       startApp();
     } catch (e) {
@@ -239,54 +220,6 @@ function renderLogin() {
       btn.disabled = false;
       btn.textContent = 'Sign in';
     }
-  }
-
-  /**
-   * Second login step: the authenticator code, or a recovery code if the app
-   * is unavailable. The password fields are removed from the DOM entirely so no
-   * half-authenticated state can be resubmitted.
-   */
-  function showTwoFactorStep() {
-    err.textContent = '';
-    clear(root);
-    const title = el('h2', { class: 'login-title', text: 'Two-factor authentication' });
-    const hint = el('p', { class: 'muted login-hint', text: 'Enter the 6-digit code from your authenticator app, or a recovery code.' });
-    const code = el('input', {
-      type: 'text', placeholder: '123 456', autocomplete: 'one-time-code',
-      inputmode: 'numeric', maxlength: '40',
-    });
-    const stepErr = el('div', { class: 'err' });
-    const verifyBtn = el('button', { class: 'btn primary', text: 'Verify', style: 'justify-content:center' });
-    const backBtn = el('button', { class: 'btn ghost', text: 'Start over', style: 'justify-content:center' });
-
-    async function verify() {
-      stepErr.textContent = '';
-      if (!code.value.trim()) { stepErr.textContent = 'Enter a code.'; return; }
-      verifyBtn.disabled = true;
-      verifyBtn.textContent = 'Verifying…';
-      try {
-        const r = await api.post('/api/auth/2fa', { code: code.value.trim() });
-        setCsrf(r.csrf);
-        saveSession(r.user, r.csrf);
-        if (r.usedRecoveryCode) {
-          setTimeout(() => toast('You signed in with a recovery code. Consider regenerating them.', 'warn'), 600);
-        }
-        startApp();
-      } catch (e) {
-        stepErr.textContent = e.message;
-        code.value = '';
-        code.focus();
-      } finally {
-        verifyBtn.disabled = false;
-        verifyBtn.textContent = 'Verify';
-      }
-    }
-
-    code.addEventListener('keydown', (e) => { if (e.key === 'Enter') verify(); });
-    verifyBtn.addEventListener('click', verify);
-    backBtn.addEventListener('click', () => { renderLogin(); });
-    root.append(title, hint, code, stepErr, verifyBtn, backBtn);
-    setTimeout(() => code.focus(), 40);
   }
 
   for (const input of [user, pass]) {
@@ -309,38 +242,12 @@ function renderLogin() {
 
 function startApp() {
   initJobs();
-  rt.on('job.progress', (d) => {
-    if (!d) return;
-    // 'download-folder' / 'download-selection' are handled by downloads.js,
-    // which streams the finished archive with progress instead of handing a
-    // bare token to the browser.
-    if (d.status === 'done' || d.status === 'error') {
-      // Hand the job back to whoever was tracking it, so only the rows it
-      // actually owns stop being dimmed.
-      resolveJob(d.id, d.status, d.message);
-      if (d.status === 'error' && d.message) toastErr('Background job failed: ' + d.message);
-    }
-  });
-  initFsWatch();
-  // Every mutation (here, another tab, another device, or a background job)
-  // invalidates the mount's cached usage server-side, so re-pull the figure.
-  rt.on('fs.changed', (d) => {
-    if (d && d.mounts && typeof d.mounts === 'object') {
-      scheduleUsageRefresh(Object.keys(d.mounts));
-    }
-  });
-  // Downloads, undo/redo and the drive report all need to be live from the
-  // first frame: a user can hit Ctrl+Z or check a drive before any navigation.
+  // Downloads and the usage figures need to be live from the first frame: a
+  // user can open the downloads tray before any navigation happens.
   initDownloads();
-  refreshHistory();
-  // The drive report (capacity) and the usage figures both feed the sidebar's
-  // per-drive size line; repaint once each lands, since the shell is built from
-  // the mounts alone.
-  loadDrives().finally(repaintSidebar);
+  // Usage feeds the sidebar's per-drive size line; repaint once it lands,
+  // since the shell is built from the mounts alone.
   loadUsage().finally(repaintSidebar);
-  // Another tab/session adding or renaming a drive must show up here too.
-  rt.on('drives.changed', () => refreshSidebarData());
-  rt.connect();
   // Mounts/favorites/recent must exist before the sidebar can render, so load
   // them first and only then build the shell.
   refreshSidebarData().finally(() => {
@@ -527,25 +434,6 @@ async function ensureDriveUsage(mountName, force = false) {
 let usageRefreshTimer = null;
 const usageRefreshQueue = new Set();
 
-function scheduleUsageRefresh(mounts) {
-  for (const m of mounts) {
-    if (typeof m === 'string' && m) usageRefreshQueue.add(m);
-  }
-  if (usageRefreshTimer) clearTimeout(usageRefreshTimer);
-  usageRefreshTimer = setTimeout(async () => {
-    const pending = [...usageRefreshQueue];
-    usageRefreshQueue.clear();
-    usageRefreshTimer = null;
-    await loadUsage();
-    repaintSidebar();
-    // The server is the authority on whether a figure needs redoing: it flags
-    // the snapshot stale on every mutation. Only chase a fresh scan when it
-    // says so — otherwise the cached number is already correct.
-    for (const m of pending) {
-      if (usageIsStale(m)) ensureDriveUsage(m, true);
-    }
-  }, 800);
-}
 
 function buildSidebar() {
   const sb = el('div', { class: 'sidebar' });
@@ -565,7 +453,6 @@ function buildSidebar() {
     collapseBtn.setAttribute('aria-label', label);
     collapseBtn.setAttribute('aria-expanded', state.sidebarCollapsed ? 'false' : 'true');
   };
-
   const toggleCollapse = () => {
     setSidebarCollapsed(!state.sidebarCollapsed);
     applyCollapsed();
@@ -597,7 +484,7 @@ function buildSidebar() {
     sb.appendChild(el('div', { class: 'side-sec' }, 'This PC'));
     const pcBtn = el('button', {
       class: 'side-item' + (view === 'thispc' ? ' active' : ''),
-      title: 'Drives, capacity and disk health',
+      title: 'Drives and capacity',
     }, icon('pc', 'ico'), el('span', { class: 'lbl', text: 'This PC' }));
     pcBtn.addEventListener('click', () => showView('thispc'));
     sb.appendChild(pcBtn);
@@ -713,9 +600,6 @@ function buildSidebar() {
       b.addEventListener('click', fn);
       return b;
     };
-    sb.appendChild(mkTool('pc', 'This PC', () => showView('thispc')));
-    sb.appendChild(mkTool('drive', 'Drives', () => showView('drives')));
-    sb.appendChild(mkTool('shield', 'Backups', () => showView('backups')));
     sb.appendChild(mkTool('share', 'Shared links', () => showView('shares')));
     sb.appendChild(mkTool('settings', 'Settings', () => showView('settings')));
     sb.appendChild(mkTool('clock', 'Recent', () => showView('recent')));
@@ -728,7 +612,6 @@ function buildSidebar() {
       sb.appendChild(mkTool('users', 'Users', () => showView('admin-users')));
       sb.appendChild(mkTool('plug', 'Mounts', () => showView('admin-mounts')));
       sb.appendChild(mkTool('ext', 'Connections', () => showView('admin-connections')));
-      sb.appendChild(mkTool('shield', 'Audit log', () => showView('admin-audit')));
     }
   };
 
@@ -750,9 +633,6 @@ function buildSidebar() {
  */
 /**
  * Remove every favourite.
- *
- * Password-gated: it is a bulk, irreversible change to a list built up one
- * click at a time, and there is no per-item undo.
  */
 async function clearAllFavourites() {
   const favs = state.favorites || [];
@@ -762,8 +642,7 @@ async function clearAllFavourites() {
     { title: 'Remove all favourites', danger: true, okLabel: 'Remove all' },
   );
   if (!ok) return;
-  const res = await withSensitive('favorites.clear', async () => clearAllFavorites());
-  if (!res) return;   // undefined = the user cancelled the password prompt
+  await clearAllFavorites();
   setFavorites([]);
   invalidate('favorites');
   toastOk('All favourites removed');
@@ -852,8 +731,6 @@ function buildTopbar() {
   tb.appendChild(mk('list', 'Menu', () => toggleDrawer(), 'btn icon only-narrow'));
   tb.appendChild(mk('up', 'Up one level (Backspace)', () => { if (pane) pane.goUp(); }));
   tb.appendChild(mk('refresh', 'Refresh (F5)', () => { if (pane) pane.refresh(); }));
-  tb.appendChild(wide(mk('undo', 'Undo (Ctrl+Z)', () => undoLast())));
-  tb.appendChild(wide(mk('redo', 'Redo (Ctrl+Y)', () => redoLast())));
   tb.appendChild(wide(mk('download', 'Downloads', () => openTray())));
 
   const writableDrive = canDo('create', currentMountInfo());
@@ -896,12 +773,6 @@ function buildTopbar() {
   });
   tb.appendChild(wide(detailsBtn));
 
-  const themeBtn = mk(state.theme === 'dark' ? 'sun' : 'moon', 'Toggle theme', () => {
-    setTheme(state.theme === 'dark' ? 'light' : 'dark', true);
-    themeBtn.replaceChildren(icon(state.theme === 'dark' ? 'sun' : 'moon'));
-  });
-  tb.appendChild(wide(themeBtn));
-
   // Narrow screens collapse the secondary controls into one menu rather than
   // clipping them off the end of the bar.
   const more = mk('grid', 'More actions', () => {
@@ -914,9 +785,7 @@ function buildTopbar() {
       { label: 'Toggle split pane', icon: 'split', onClick: () => splitBtn.click() },
       { label: 'Background jobs', icon: 'job', onClick: () => jobsBtn.click() },
       { label: 'Downloads', icon: 'download', onClick: () => openTray() },
-      { label: 'Undo history…', icon: 'undo', onClick: () => historyDialog() },
       { label: 'Toggle details panel', icon: 'info', onClick: () => detailsBtn.click() },
-      { label: 'Toggle theme', icon: state.theme === 'dark' ? 'sun' : 'moon', onClick: () => themeBtn.click() },
     ]);
   }, 'btn icon only-narrow');
   tb.appendChild(more);
@@ -929,7 +798,6 @@ function buildTopbar() {
       { label: state.user.displayName || state.user.username, disabled: true },
       { sep: true },
       { label: 'Change password', icon: 'edit', onClick: () => changePassword(false) },
-      { label: 'Two-factor authentication', icon: 'shield', onClick: () => twoFactorDialog() },
       {
         label: 'Reload app data', icon: 'refresh',
         onClick: () => {
@@ -937,7 +805,6 @@ function buildTopbar() {
           invalidate('mounts');
           invalidate('favorites');
           invalidate('recent');
-          invalidate('drives');
           invalidate('list:');
           refreshSidebarData();
           repaintPanes();
@@ -1025,21 +892,48 @@ function showView(name) {
   });
   else if (name === 'shares') renderSharesView(c, { onChanged: () => {} });
   else if (name === 'settings') renderSettings(c, { onChangePassword: changePassword, onOpenView: (v) => showView(v) });
-  else if (name === 'drives') renderDrivesView(c, { onChanged: onDrivesChanged });
-  else if (name === 'thispc') renderThisPcView(c, {
-    onOpenDrive: (d) => navigateTo(d.mount, '/'),
-    onBackupDrive: (d) => backupDialog({ mount: d.mount, path: '/' }, () => { showView('backups'); }),
-    onRenameDrive: renameDriveFromPc,
-    onScanDrive: scanDriveFromPc,
-    onDisconnectDrive: disconnectDriveFromPc,
-  });
-  else if (name === 'backups') renderBackupsView(c, {
-    onOpenPath: (m, p) => navigateTo(m, p),
-  });
   else if (name === 'admin-users') renderAdminUsers(c);
   else if (name === 'admin-mounts') renderAdminMounts(c);
   else if (name === 'admin-connections') renderAdminConnections(c);
-  else if (name === 'admin-audit') renderAdminAudit(c);
+  else if (name === 'thispc') renderThisPc(c);
+}
+
+/* ------------------------------------------------------- This PC / drives */
+
+/** Drives overview (the "This PC" sidebar entry). Lists every mount the user
+ * can see with its type and usage, and opens a drive into a tab. */
+async function renderThisPc(c) {
+  const page = el('div', { class: 'admin-page' }, el('h2', {}, 'This PC'));
+  page.appendChild(el('p', { class: 'muted', text:
+    'Every drive available to your account. Local drives use the host filesystem; ' +
+    'remote drives (S3 / R2, added later from Connections) show their own scanned usage.' }));
+
+  await loadUsage();
+  const table = el('table', { class: 'table' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Drive'), el('th', {}, 'Type'), el('th', {}, 'Usage'), el('th', { class: 'actions' }, 'Actions'))),
+  );
+  const tbody = el('tbody');
+  for (const m of state.mounts) {
+    const parts = driveUsageParts(m.name);
+    const tr = el('tr', {},
+      el('td', {}, icon('drive', 'ico'), el('span', { class: 'drive-name', text: m.label || m.name })),
+      el('td', {}, el('span', { class: 'badge', text: m.adapter === 's3' ? 'S3 / R2' : 'Local' })),
+      el('td', { class: 'muted', text: usageLabel(parts) }),
+    );
+    const actions = el('td', { class: 'actions' });
+    const open = el('button', { class: 'btn' }, 'Open');
+    open.addEventListener('click', () => navigateTo(m.name, '/'));
+    actions.appendChild(open);
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  page.appendChild(tableWrap(table));
+  if (!state.mounts.length) {
+    page.appendChild(el('div', { class: 'empty-hint', text: 'No drives configured yet.' }));
+  }
+  c.appendChild(page);
 }
 
 /** Release both panes before the DOM they live in is thrown away. */
@@ -1125,7 +1019,6 @@ function wirePane(p, secondary) {
   p.onUpload = (inst) => pickUpload(inst);
   p.onToggleFavorite = (inst, entry) => toggleFavouriteFor(inst, entry);
   p.onColumnsMenu = (e) => columnsMenu(e, p);
-  p.onFindDuplicates = (inst) => runDuplicateScan(inst);
   p.onBulkRename = (inst, entries) => runBulkRename(inst, entries);
   p.onOpenEntry = (inst, entry) => {
     // Navigating into a folder is already recorded by onNavigate.
@@ -1339,13 +1232,6 @@ function backgroundMenu(e, inst) {
     { sep: true },
     { label: 'Paste', icon: 'paste', cap: 'create', disabled: !state.clipboard, onClick: () => pasteInto(inst) },
     { sep: true },
-    { label: 'Find duplicates…', icon: 'copy', onClick: () => runDuplicateScan(inst) },
-    { sep: true },
-    { label: 'Undo', icon: 'undo', onClick: () => undoLast() },
-    { label: 'Redo', icon: 'redo', onClick: () => redoLast() },
-    { label: 'Back up this folder…', icon: 'shield', onClick: () => backupDialog({ mount: inst.loc.mount, path: inst.loc.path }, () => showView('backups')) },
-    { label: 'Drive properties', icon: 'info', onClick: () => openDriveProperties(inst.loc.mount) },
-    { sep: true },
     { label: 'Refresh', icon: 'refresh', onClick: () => inst.refresh() },
     { label: 'Select all', icon: 'check', onClick: () => inst.selectAll() },
   ];
@@ -1369,7 +1255,6 @@ async function newFolder(inst = pane) {
     invalidate: [[mount, dir]],
     okMsg: 'Folder created',
   });
-  recordOp('mkdir', mount, name, { mount, items: [{ path: created }] });
 }
 
 async function newFile(inst = pane) {
@@ -1386,39 +1271,6 @@ async function newFile(inst = pane) {
     invalidate: [[mount, dir]],
     okMsg: 'File created',
   });
-  recordOp('mkdir', mount, name, { mount, items: [{ path: created }] });
-}
-
-/* ------------------------------------------------------------ undo / redo */
-
-/**
- * Undo and Redo.
- *
- * The stack lives on the server (op_history) rather than in a module variable:
- * it then survives a reload, is shared between tabs, and can undo operations
- * that need a background job. Every mutating action records itself as it
- * completes (see recordOp in history.js), so these two functions only have to
- * ask for the newest step to be reversed or repeated.
- */
-async function undoLast() {
-  const ok = await undoStep();
-  if (!ok) return;
-  await afterHistoryChange();
-}
-
-async function redoLast() {
-  const ok = await redoStep();
-  if (!ok) return;
-  await afterHistoryChange();
-}
-
-/** Undo/redo can change several folders at once; make every pane agree. */
-async function afterHistoryChange() {
-  invalidate('list:');
-  repaintPanes();
-  if (pane) pane.scheduleRevalidate(250);
-  if (pane2) pane2.scheduleRevalidate(250);
-  await refreshSidebarData();
 }
 
 async function renameEntry(inst, entry) {
@@ -1440,13 +1292,6 @@ async function renameEntry(inst, entry) {
     invalidate: [[mount, dirOf(entry.path)], [mount, inst.loc.path]],
     okMsg: 'Renamed',
   });
-  // A rename is recorded as a move: undoing it just moves the item back.
-  if (res && !res.skipped) {
-    recordOp('rename', mount, entry.name + ' \u2192 ' + name, {
-      mount, destMount: mount,
-      items: [{ from: entry.path, to: (res && res.path) || target }],
-    });
-  }
 }
 
 function renameSelection(inst) {
@@ -1476,24 +1321,6 @@ function columnsMenu(e, inst) {
       },
     })),
   ]);
-}
-
-/** Scan the open folder for duplicates and offer to select or delete them. */
-function runDuplicateScan(inst) {
-  if (!inst) return;
-  duplicatesDialog({
-    entries: inst.entries,
-    folderLabel: inst.loc.path,
-    onSelect: (paths) => {
-      inst.selected.clear();
-      for (const p of paths) inst.selected.add(p);
-      inst.paintSelection();
-      toastOk(`${paths.length} duplicate(s) selected`);
-    },
-    // deleteEntries() owns the confirm dialog AND the password gate, so the
-    // gate is not applied twice here.
-    onDelete: (entries) => deleteEntries(inst, entries),
-  });
 }
 
 /** Bulk-rename the current selection. */
@@ -1527,14 +1354,6 @@ async function deleteEntries(inst, entries) {
   // stay visible (dimmed) until the worker confirms.
   const files = entries.filter(e => e.type !== 'dir');
 
-  // Ask for the password BEFORE the optimistic patch. runOp() hides the rows
-  // first and rolls them back on failure, so letting the 403 happen inside it
-  // would flash "deleted" and then resurrect everything behind a dialog.
-  if (isGated('fs.delete', permanent)) {
-    const granted = await ensureSensitive('fs.delete');
-    if (!granted) return;
-  }
-
   const res = await runOp({
     pane: inst,
     patch: () => ({ remove: files.map(e => e.path) }),
@@ -1546,13 +1365,6 @@ async function deleteEntries(inst, entries) {
 
   reportBatch(res, { verb: 'Deleted', openJobs });
   inst.scheduleRevalidate(700);
-  // Only trashed deletes are reversible — a permanent one never pretends to be.
-  if (!permanent) {
-    recordOp('delete', mount, `${entries.length} item(s)`, {
-      mount,
-      items: entries.map((e) => ({ path: e.path, name: e.name })),
-    });
-  }
 }
 
 /* ------------------------------------------- selection-bar / drag-drop actions */
@@ -1605,17 +1417,6 @@ async function movePaths(inst, paths, destMount, destDir, srcMount) {
   if (res && skipped) toastWarn(`${skipped} item(s) skipped`);
   if (res) {
     inst.scheduleRevalidate(700);
-    // `done` carries {path, dest}, which is exactly the from→to pair the
-    // history needs. Items handed to a background job (folders, cross-drive)
-    // arrive without a destination yet, so they are not recorded here.
-    const moves = (res.done || [])
-      .filter((d) => d.dest)
-      .map((d) => ({ from: d.path, to: d.dest }));
-    if (moves.length) {
-      recordOp('move', mount, `${moves.length} item(s)`, {
-        mount, destMount: destMount, items: moves,
-      });
-    }
   }
 }
 
@@ -1665,17 +1466,6 @@ async function pasteInto(inst) {
   reportBatch(res, { verb: isCut ? 'Moved' : 'Copied', openJobs });
   if (isCut && (res.done || []).length) state.clipboard = null;
   inst.scheduleRevalidate(700);
-
-  // Cross-drive pastes run as jobs, so their final paths are not known here —
-  // only the inline part is recorded as reversible.
-  const items = (res.done || [])
-    .filter((d) => d.dest)
-    .map((d) => ({ from: d.path, to: d.dest }));
-  if (items.length) {
-    recordOp(isCut ? 'move' : 'copy', mount, `${items.length} item(s)`, {
-      mount, destMount: mount, items,
-    });
-  }
 }
 
 function pickUpload(inst = pane) {
@@ -1877,10 +1667,6 @@ async function renderTrash(c) {
     const ok = await confirmDialog('Permanently delete everything in the trash? This cannot be undone.',
       { title: 'Empty trash', danger: true, okLabel: 'Empty trash' });
     if (!ok) return;
-    // Password gate — emptying trash is the most destructive thing in the app.
-    // One grant covers every mount, so this is asked once, not per drive.
-    const granted = await ensureSensitive('trash.empty');
-    if (!granted) return;
     let emptied = 0;
     for (const m of state.mounts) {
       try { await trashEmpty(m.name); emptied++; } catch (_) { /* mount may not have trash */ }
@@ -1932,8 +1718,6 @@ async function renderTrash(c) {
     purge.addEventListener('click', async () => {
       const ok = await confirmDialog(`Permanently delete "${it.name}"?`, { title: 'Delete', danger: true, okLabel: 'Delete' });
       if (!ok) return;
-      const granted = await ensureSensitive('trash.empty');
-      if (!granted) return;
       try { await trashPurge(it.mountName, it.id); toastOk('Deleted'); showView('trash'); }
       catch (e) { toastErr(e.message); }
     });
@@ -2055,6 +1839,120 @@ function userDialog(u, onDone) {
   });
 }
 
+/* ---------------------------------------------------- admin: connections */
+
+async function renderAdminConnections(c) {
+  const page = el('div', { class: 'admin-page' }, el('h2', {}, 'S3 / R2 connections'));
+  const bar = el('div', { class: 'admin-toolbar' });
+  const add = el('button', { class: 'btn primary' }, icon('plus'), 'New connection');
+  add.addEventListener('click', () => connectionDialog(() => showView('admin-connections')));
+  bar.appendChild(add);
+  page.appendChild(bar);
+  page.appendChild(el('p', { class: 'muted', text:
+    'Any S3-compatible store: AWS S3, Cloudflare R2, MinIO, Wasabi, Backblaze B2. ' +
+    'Credentials are encrypted at rest and never sent back to the browser.' }));
+
+  let data;
+  try { data = await api.get('/api/admin/connections'); }
+  catch (e) { page.appendChild(el('div', { class: 'muted', text: e.message })); c.appendChild(page); return; }
+
+  if (!data.connections.length) {
+    page.appendChild(el('div', { class: 'empty-hint', text: 'No saved connections yet.' }));
+    c.appendChild(page);
+    return;
+  }
+
+  const table = el('table', { class: 'table' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Name'), el('th', {}, 'Endpoint'), el('th', {}, 'Bucket'),
+      el('th', {}, 'Region'), el('th', {}, 'Access key'), el('th', { class: 'actions' }, 'Actions'))),
+  );
+  const tbody = el('tbody');
+  for (const cn of data.connections) {
+    const tr = el('tr', {},
+      el('td', {}, cn.name),
+      el('td', { class: 'muted', text: `${cn.host}:${cn.port}` }),
+      el('td', {}, cn.bucket || '—'),
+      el('td', { class: 'muted', text: cn.region || '—' }),
+      el('td', { class: 'muted', text: cn.username || '—' }),
+    );
+    const actions = el('td', { class: 'actions' });
+    const test = el('button', { class: 'btn' }, 'Test');
+    test.addEventListener('click', async () => {
+      test.disabled = true; test.textContent = 'Testing…';
+      try {
+        const r = await api.post(`/api/admin/connections/${cn.id}/test`, {});
+        if (r.reachable) toastOk(`${cn.name}: reachable`);
+        else toastErr(`${cn.name}: ${r.error || 'unreachable'}`);
+      } catch (e) { toastErr(e.message); }
+      finally { test.disabled = false; test.textContent = 'Test'; }
+    });
+    const del = el('button', { class: 'btn danger' }, 'Delete');
+    del.addEventListener('click', async () => {
+      const ok = await confirmDialog(`Delete connection "${cn.name}"? Any drive using it will stop working.`, { title: 'Delete connection', danger: true, okLabel: 'Delete' });
+      if (!ok) return;
+      try { await api.delete(`/api/admin/connections/${cn.id}`); toastOk('Connection deleted'); showView('admin-connections'); }
+      catch (e) { toastErr(e.message); }
+    });
+    actions.append(test, del);
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  page.appendChild(tableWrap(table));
+  c.appendChild(page);
+}
+
+function connectionDialog(onDone) {
+  const name = el('input', { type: 'text', placeholder: 'r2-main' });
+  const endpoint = el('input', { type: 'text', placeholder: 'https://<account>.r2.cloudflarestorage.com' });
+  const bucket = el('input', { type: 'text', placeholder: 'my-bucket' });
+  const region = el('input', { type: 'text', value: 'auto', placeholder: 'auto / us-east-1' });
+  const accessKeyId = el('input', { type: 'text', placeholder: 'Access key id', autocomplete: 'off' });
+  const secretAccessKey = el('input', { type: 'password', placeholder: 'Secret access key', autocomplete: 'off' });
+  const pathStyle = el('input', { type: 'checkbox' });
+  pathStyle.checked = true;
+  const remoteBase = el('input', { type: 'text', value: '/' });
+
+  dialog({
+    title: 'New S3 / R2 connection',
+    body: [
+      el('label', { class: 'field' }, 'Name', name),
+      el('label', { class: 'field' }, 'Endpoint URL (scheme + host, port optional)', endpoint),
+      el('label', { class: 'field' }, 'Bucket', bucket),
+      el('label', { class: 'field' }, 'Region (R2 uses "auto")', region),
+      el('label', { class: 'field' }, 'Access key id', accessKeyId),
+      el('label', { class: 'field' }, 'Secret access key (stored encrypted)', secretAccessKey),
+      el('label', { class: 'checkbox' }, pathStyle, 'Path-style URLs (on for R2 / MinIO, off for AWS)'),
+      el('label', { class: 'field' }, 'Base path inside the bucket', remoteBase),
+    ],
+    buttons: [
+      { label: 'Cancel' },
+      {
+        label: 'Create', kind: 'primary', primary: true,
+        onClick: async () => {
+          try {
+            // The scheme on the endpoint decides TLS verification: https ->
+            // verify (AWS/R2), http -> plain (LAN MinIO, test endpoints).
+            const ep = endpoint.value.trim();
+            const verifyTls = !/^http:\/\//i.test(ep);
+            await api.post('/api/admin/connections', {
+              name: name.value.trim(), protocol: 's3',
+              endpoint: ep, bucket: bucket.value.trim(),
+              region: region.value.trim() || 'auto',
+              accessKeyId: accessKeyId.value.trim(), secretAccessKey: secretAccessKey.value,
+              pathStyle: pathStyle.checked, remoteBase: remoteBase.value.trim() || '/',
+              verifyTls,
+            });
+            toastOk('Connection created');
+            onDone ? onDone() : showView('admin-connections');
+          } catch (e) { toastErr(e.message); return false; }
+        },
+      },
+    ],
+  });
+}
+
 /* --------------------------------------------------------- admin: mounts */
 
 async function renderAdminMounts(c) {
@@ -2113,9 +2011,11 @@ function mountDialog(m, onDone) {
   const name = el('input', { type: 'text', value: m ? m.name : '', placeholder: 'local' });
   const label = el('input', { type: 'text', value: m ? m.label : '', placeholder: 'Local Storage' });
   const adapter = el('select', {},
-    ...['local', 'ftp', 'ftps', 'sftp', 'smb', 'http'].map(a => el('option', { value: a, text: a })));
+    ...['local', 's3'].map(a => el('option', { value: a, text: a === 's3' ? 'S3 / R2 (remote)' : 'local (encrypted)' })));
   adapter.value = m ? m.adapter : 'local';
   const localRoot = el('input', { type: 'text', value: m && m.local_root ? m.local_root : '', placeholder: '/srv/storage/local' });
+  const connectionId = el('input', { type: 'number', min: '1', placeholder: 'Connection id (see Connections)' });
+  if (m && m.connection_id) connectionId.value = String(m.connection_id);
   const remotePath = el('input', { type: 'text', value: m ? (m.remote_path || '/') : '/', placeholder: '/' });
 
   const body = [
@@ -2123,7 +2023,8 @@ function mountDialog(m, onDone) {
     el('label', { class: 'field' }, 'Label', label),
     el('label', { class: 'field' }, 'Adapter', adapter),
     el('label', { class: 'field' }, 'Local root (local adapter only)', localRoot),
-    el('label', { class: 'field' }, 'Remote path', remotePath),
+    el('label', { class: 'field' }, 'Connection id (S3/R2 only)', connectionId),
+    el('label', { class: 'field' }, 'Remote path (S3/R2 only)', remotePath),
   ];
 
   if (!m) {
@@ -2139,6 +2040,7 @@ function mountDialog(m, onDone) {
               await api.post('/api/admin/mounts', {
                 name: name.value.trim(), label: label.value.trim(), adapter: adapter.value,
                 localRoot: localRoot.value.trim().replace(/^\/srv\/storage\/local\/?/, ''),
+                connectionId: Number(connectionId.value) || 0,
                 remotePath: remotePath.value.trim() || '/', visibleAll: true, trashEnabled: true,
               });
               toastOk('Mount created');
@@ -2184,153 +2086,6 @@ function mountDialog(m, onDone) {
   });
 }
 
-/* ---------------------------------------------------- admin: connections */
-
-async function renderAdminConnections(c) {
-  const page = el('div', { class: 'admin-page' }, el('h2', {}, 'Remote connections'));
-  const bar = el('div', { class: 'admin-toolbar' });
-  const add = el('button', { class: 'btn primary' }, icon('plus'), 'New connection');
-  add.addEventListener('click', () => connectionDialog(() => showView('admin-connections')));
-  bar.appendChild(add);
-  page.appendChild(bar);
-  page.appendChild(el('p', { class: 'muted', text: 'Credentials are encrypted at rest and never sent to the browser.' }));
-
-  let data;
-  try { data = await api.get('/api/admin/connections'); }
-  catch (e) { page.appendChild(el('div', { class: 'muted', text: e.message })); c.appendChild(page); return; }
-
-  if (!data.connections.length) {
-    page.appendChild(el('div', { class: 'empty-hint', text: 'No saved connections yet.' }));
-    c.appendChild(page);
-    return;
-  }
-
-  const table = el('table', { class: 'table' },
-    el('thead', {}, el('tr', {},
-      el('th', {}, 'Name'), el('th', {}, 'Protocol'), el('th', {}, 'Host'),
-      el('th', {}, 'Port'), el('th', {}, 'Username'), el('th', {}, 'Auth'),
-      el('th', { class: 'actions' }, 'Actions'))),
-  );
-  const tbody = el('tbody');
-  for (const cn of data.connections) {
-    const tr = el('tr', {},
-      el('td', {}, cn.name),
-      el('td', {}, el('span', { class: 'badge', text: cn.protocol })),
-      el('td', { class: 'muted', text: cn.host }),
-      el('td', { class: 'muted', text: String(cn.port) }),
-      el('td', { class: 'muted', text: cn.username || '—' }),
-      el('td', { class: 'muted', text: cn.auth_type }),
-    );
-    const actions = el('td', { class: 'actions' });
-    const test = el('button', { class: 'btn' }, 'Test');
-    test.addEventListener('click', async () => {
-      test.disabled = true; test.textContent = 'Testing…';
-      try {
-        const r = await api.post(`/api/admin/connections/${cn.id}/test`, {});
-        if (r.reachable) toastOk(`${cn.name}: reachable`);
-        else toastErr(`${cn.name}: ${r.error || 'unreachable'}`);
-      } catch (e) { toastErr(e.message); }
-      finally { test.disabled = false; test.textContent = 'Test'; }
-    });
-    const del = el('button', { class: 'btn danger' }, 'Delete');
-    del.addEventListener('click', async () => {
-      const ok = await confirmDialog(`Delete connection "${cn.name}"? Any drive using it will stop working.`, { title: 'Delete connection', danger: true, okLabel: 'Delete' });
-      if (!ok) return;
-      const granted = await ensureSensitive('connection.delete');
-      if (!granted) return;
-      try { await api.delete(`/api/admin/connections/${cn.id}`); toastOk('Connection deleted'); showView('admin-connections'); }
-      catch (e) { toastErr(e.message); }
-    });
-    actions.append(test, del);
-    tr.appendChild(actions);
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  page.appendChild(tableWrap(table));
-  c.appendChild(page);
-}
-
-function connectionDialog(onDone) {
-  const name = el('input', { type: 'text', placeholder: 'office-nas' });
-  const protocol = el('select', {}, ...['ftp', 'ftps', 'sftp', 'smb', 'http'].map(p => el('option', { value: p, text: p })));
-  const host = el('input', { type: 'text', placeholder: '10.0.0.5' });
-  const port = el('input', { type: 'number', value: '21' });
-  const username = el('input', { type: 'text' });
-  const authType = el('select', {}, ...['password', 'key', 'none'].map(a => el('option', { value: a, text: a })));
-  const secret = el('textarea', { rows: '3', placeholder: 'Password or private key (stored encrypted)' });
-  const remoteBase = el('input', { type: 'text', value: '/' });
-  const verifyTls = el('input', { type: 'checkbox' }); verifyTls.checked = true;
-
-  const defaultPorts = { ftp: '21', ftps: '21', sftp: '22', smb: '445', http: '80' };
-  protocol.addEventListener('change', () => { port.value = defaultPorts[protocol.value] || '21'; });
-
-  dialog({
-    title: 'New connection',
-    body: [
-      el('label', { class: 'field' }, 'Name', name),
-      el('label', { class: 'field' }, 'Protocol', protocol),
-      el('label', { class: 'field' }, 'Host', host),
-      el('label', { class: 'field' }, 'Port', port),
-      el('label', { class: 'field' }, 'Username', username),
-      el('label', { class: 'field' }, 'Auth type', authType),
-      el('label', { class: 'field' }, 'Secret', secret),
-      el('label', { class: 'field' }, 'Remote base path', remoteBase),
-      el('label', { class: 'checkbox' }, verifyTls, 'Verify TLS certificate'),
-    ],
-    buttons: [
-      { label: 'Cancel' },
-      {
-        label: 'Create', kind: 'primary', primary: true,
-        onClick: async () => {
-          try {
-            await api.post('/api/admin/connections', {
-              name: name.value.trim(), protocol: protocol.value, host: host.value.trim(),
-              port: Number(port.value), username: username.value.trim(), authType: authType.value,
-              secret: secret.value, remoteBase: remoteBase.value.trim() || '/', verifyTls: verifyTls.checked,
-            });
-            toastOk('Connection created');
-            onDone ? onDone() : showView('admin-connections');
-          } catch (e) { toastErr(e.message); return false; }
-        },
-      },
-    ],
-  });
-}
-
-/* --------------------------------------------------------- admin: audit */
-
-async function renderAdminAudit(c) {
-  const page = el('div', { class: 'admin-page' }, el('h2', {}, 'Audit log'));
-  let data;
-  try { data = await api.get('/api/admin/audit?limit=200'); }
-  catch (e) { page.appendChild(el('div', { class: 'muted', text: e.message })); c.appendChild(page); return; }
-
-  if (!data.entries.length) {
-    page.appendChild(el('div', { class: 'empty-hint', text: 'No audit entries yet.' }));
-    c.appendChild(page);
-    return;
-  }
-  const table = el('table', { class: 'table' },
-    el('thead', {}, el('tr', {},
-      el('th', {}, 'When'), el('th', {}, 'User'), el('th', {}, 'Action'),
-      el('th', {}, 'Target'), el('th', {}, 'Result'), el('th', {}, 'IP'))),
-  );
-  const tbody = el('tbody');
-  for (const e of data.entries) {
-    tbody.appendChild(el('tr', {},
-      el('td', { class: 'muted', text: e.created_at || '' }),
-      el('td', { class: 'muted', text: e.username || e.user_id || '—' }),
-      el('td', {}, e.action || ''),
-      el('td', { class: 'muted', text: [e.mount, e.path, e.target].filter(Boolean).join(' ') || '—' }),
-      el('td', {}, el('span', { class: 'badge' + (e.result === 'ok' ? ' ok' : ''), text: e.result || '' })),
-      el('td', { class: 'muted', text: e.ip || '' }),
-    ));
-  }
-  table.appendChild(tbody);
-  page.appendChild(tableWrap(table));
-  c.appendChild(page);
-}
-
 /* ------------------------------------------------------- misc / utilities */
 
 async function refreshSidebarData() {
@@ -2359,7 +2114,6 @@ async function onDrivesChanged() {
   // Drop the cached sidebar data first: without this the refresh below would be
   // served from the 30s mount cache and the new drive would not appear.
   invalidate('mounts');
-  invalidate('drives');
   await refreshSidebarData();
   // If the active tab pointed at a drive that just disappeared, fall back.
   const tab = currentTab();
@@ -2463,7 +2217,6 @@ function changePassword(forced) {
  */
 async function logout() {
   try { await api.post('/api/auth/logout', {}); } catch (_) { /* ignore */ }
-  rt.disconnect();
   abortAllUploads();
   closeJobs();
   closeMenu();
@@ -2488,52 +2241,7 @@ async function logout() {
   state.recent = [];
   setCsrf('');
 
-  // Drop any short-lived sensitive-action grants so the next session starts
-  // clean; the server expires them anyway, but don't even hint they persist.
-  resetGrants();
-
   renderLogin();
-}
-
-/**
- * The full undo/redo stack.
- *
- * Ctrl+Z and Ctrl+Y cover the common case; this is for when someone wants a
- * specific step back — the server keeps the last 100 operations.
- */
-async function historyDialog() {
-  const { entries } = await refreshHistory();
-  if (!entries.length) { toast('No operations recorded yet.', 'info'); return; }
-
-  const list = el('div', { class: 'history-list' });
-  for (const e of entries) {
-    const row = el('div', { class: 'history-row' + (e.undone ? ' undone' : '') },
-      el('span', { class: 'hi-op', text: historyLabel(e) }),
-      el('span', { class: 'muted', text: e.undone ? 'reversed' : 'applied' }),
-      el('span', { style: 'flex:1' }),
-      el('button', {
-        class: 'btn sm', text: e.undone ? 'Redo' : 'Undo',
-        onclick: async () => {
-          if (e.undone) await redoStep(e.id); else await undoStep(e.id);
-          await afterHistoryChange();
-          historyDialog();
-        },
-      }),
-    );
-    list.appendChild(row);
-  }
-
-  dialog({
-    title: 'Undo history',
-    body: [el('p', { class: 'muted', text: 'Operations are kept on the server, so this list survives a reload. Doing something new clears the redo branch.' }), list],
-    buttons: [
-      {
-        label: 'Clear history', danger: true,
-        onClick: async () => { await clearHistory(); },
-      },
-      { label: 'Close' },
-    ],
-  });
 }
 
 /* ------------------------------------------------------- This PC / drives */
@@ -2578,50 +2286,6 @@ async function entryProperties(inst, entry) {
   });
 }
 
-/** Drive report for whatever drive a pane is currently showing. */
-async function openDriveProperties(mountName) {
-  const drives = (state.drivesInfo && state.drivesInfo.length)
-    ? state.drivesInfo
-    : await loadDrives();
-  const d = (drives || []).find((x) => x.mount === mountName);
-  if (d) propertiesDialog(d);
-  else toastWarn('No drive information available for ' + mountName);
-}
-
-async function renameDriveFromPc(d) {
-  const label = await promptDialog('New name for this drive', d.label, { title: 'Rename drive', okLabel: 'Rename' });
-  if (!label || label === d.label) return;
-  try {
-    await api.post(`/api/drives/${encodeURIComponent(d.id)}/rename`, { label });
-    toastOk('Drive renamed');
-    await onDrivesChanged();
-    await loadDrives(true);
-    showView('thispc');
-  } catch (e) { toastErr(e.message); }
-}
-
-async function scanDriveFromPc(d) {
-  try {
-    await api.post(`/api/usage/${encodeURIComponent(d.mount)}/scan`, {});
-    toast('Scanning storage in the background…', 'info');
-    openJobs();
-  } catch (e) { toastErr(e.message); }
-}
-
-async function disconnectDriveFromPc(d) {
-  const ok = await confirmDialog(
-    `Disconnect "${d.label}"? Nothing is deleted — the files stay where they are, and the drive can be added back later.`,
-    { title: 'Disconnect drive', danger: true, okLabel: 'Disconnect' },
-  );
-  if (!ok) return;
-  const res = await withSensitive('drive.disconnect', () => api.delete(`/api/drives/${encodeURIComponent(d.id)}`));
-  if (!res) return;
-  toastOk('Drive disconnected — data kept');
-  await onDrivesChanged();
-  await loadDrives(true);
-  showView('thispc');
-}
-
 function globalKeys(e) {
   if (!state.user) return;   // signed out: the shell is gone
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || '')) || e.target.isContentEditable;
@@ -2630,10 +2294,6 @@ function globalKeys(e) {
   if (view !== 'files' || !pane) return;
   const mod = e.ctrlKey || e.metaKey;
   if (e.key === 'F5') { e.preventDefault(); pane.refresh(); return; }
-  if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undoLast(); return; }
-  if ((mod && e.key.toLowerCase() === 'y') || (mod && e.shiftKey && e.key.toLowerCase() === 'z')) {
-    e.preventDefault(); redoLast(); return;
-  }
   // Ctrl+L / Alt+D: type a path, like Explorer's address bar.
   if ((mod && e.key.toLowerCase() === 'l') || (e.altKey && e.key.toLowerCase() === 'd')) {
     e.preventDefault();

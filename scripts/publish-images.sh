@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 #
-# Publish the four ANSNEW CLOUD images to a registry.
+# Publish the ANSNEW CLOUD images to a registry.
 #
 # Each component gets its own tag in a single repository, e.g. for
 # `needyamin/ansnew-cloud` with version 1.0.0:
 #
 #   needyamin/ansnew-cloud:nginx        needyamin/ansnew-cloud:nginx-1.0.0
 #   needyamin/ansnew-cloud:php          needyamin/ansnew-cloud:php-1.0.0
-#   needyamin/ansnew-cloud:ws           needyamin/ansnew-cloud:ws-1.0.0
-#   needyamin/ansnew-cloud:nas          needyamin/ansnew-cloud:nas-1.0.0
 #
 # Docker Hub allows only ONE slash in a repository path (namespace/repository),
-# which is why this is one repo with four tags rather than four nested paths.
+# which is why this is one repo with two tags rather than two nested paths.
 #
 # Usage
 #   scripts/publish-images.sh <repository> [version] [options]
@@ -55,7 +53,7 @@ done
 cd "$(dirname "$0")/.."
 
 # component -> local image that `docker compose build` produces
-COMPONENTS=(nginx php ws nas)
+COMPONENTS=(nginx php)
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
@@ -63,10 +61,9 @@ say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 if [ "$DO_BUILD" -eq 1 ]; then
     say "Building images"
     if [ "$DRY_RUN" -eq 1 ]; then
-        echo "  (dry run) docker compose --profile nas --profile mysql build"
+        echo "  (dry run) docker compose build"
     else
-        # The nas image only exists behind its profile, so build it explicitly.
-        docker compose --profile nas --profile mysql build
+        docker compose build
     fi
 else
     say "Skipping build (--no-build)"
@@ -110,7 +107,7 @@ fi
 
 # Push the smallest image first so an auth or naming problem surfaces before we
 # upload hundreds of megabytes.
-ORDER=(nginx ws nas php)
+ORDER=(nginx php)
 failed=0
 for c in "${ORDER[@]}"; do
     tags=("${REPO}:${c}-${VERSION}")

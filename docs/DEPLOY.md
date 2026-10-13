@@ -2,12 +2,8 @@
 
 Target: a Linux server with a public IP, reached at `https://<your-domain>`.
 
-The stack is five containers behind one nginx: `nginx` (SPA + TLS + FastCGI),
-`php` (php-fpm), `worker` (background jobs), `ws` (WebSocket notifications), and
-optionally `db` (MariaDB — **not** used here; this guide keeps SQLite).
-
-> **Do not enable the `nas` (SMB, port 445) or `mysql` compose profiles on a
-> public host.** They are for a trusted LAN or development only.
+The stack is three containers behind one nginx: `nginx` (SPA + TLS + FastCGI),
+`php` (php-fpm) and `worker` (background jobs). Storage is SQLite only.
 
 ---
 
@@ -90,8 +86,8 @@ ACME_WEBROOT_HOST_PATH=/var/www/ansnew-acme
 TRUST_PROXY=true
 ```
 
-`APP_KEY`, `WS_SECRET` and `data/keys/file.key` are generated on first boot.
-**Back them up** — see [BACKUP-RESTORE.md](BACKUP-RESTORE.md).
+`APP_KEY` and `data/keys/file.key` are generated on first boot.
+**Back them up** (see the snapshot command under "Common operations").
 
 ---
 
@@ -184,7 +180,8 @@ video, run a folder download, and confirm progress appears in real time.
 
 ```bash
 cd /srv/ansnew-cloud
-./scripts/backup.sh                    # always take a snapshot first
+docker compose stop                    # quiesce before the snapshot
+tar czf ~/ansnew-snapshot-$(date +%F).tgz -C /var/lib/docker/volumes/ansnew-cloud_data_volume storage-root   # db + keys + files
 git pull --ff-only                     # without this you rebuild the OLD source
 docker compose build
 docker compose up -d --force-recreate  # migrations run automatically on boot
@@ -197,8 +194,9 @@ previous build. Skipping `git pull` is the other classic failure — `build` the
 happily bakes whatever checkout is on disk.
 
 Migrations are additive and idempotent (`Database::applyAdditiveMigrations()`),
-so an upgrade never drops data. Take a backup anyway — the pre-upgrade snapshot
-is your rollback.
+so an upgrade never drops data. Keep the pre-upgrade snapshot anyway — it is
+your rollback, and it is the only copy of `data/keys/` if the volume is ever
+lost.
 
 ### Upgrading from published images
 
@@ -207,7 +205,7 @@ If you deploy pre-built images instead of building on the server (see
 and pull:
 
 ```bash
-./scripts/backup.sh
+# (snapshot as above)
 # bump the tags in .env, then:
 docker compose pull
 docker compose up -d --no-build --force-recreate
@@ -258,10 +256,9 @@ docker compose pull && docker compose up -d --no-build --force-recreate
 ```
 
 This is why version tags beat `latest` on a real deployment — `latest` has nothing
-to roll back to. Whichever route you take, keep the pre-upgrade snapshot: if a
-migration did something unexpected, restore it with
-`docker compose exec php php bin/console.php ansnew:restore --from=/backups/<dir> --yes`
-(see [BACKUP-RESTORE.md](BACKUP-RESTORE.md)).
+to roll back to. Whichever route you take, keep the pre-upgrade snapshot. There is no
+in-app restore command: to roll back, stop the stack and copy the snapshot's
+`_data` back over the volume (database **and** `keys/`), then start again.
 
 ---
 
@@ -273,7 +270,7 @@ migration did something unexpected, restore it with
 | Reload nginx after a cert change | `docker compose exec nginx nginx -s reload` |
 | Reset a password | `docker compose exec php php bin/console.php ansnew:reset-password --random` |
 | Encryption status | `docker compose exec php php bin/console.php ansnew:crypto-status` |
-| Backup now | `./scripts/backup.sh` |
+| Snapshot data + keys | `docker compose stop && tar czf ~/snap.tgz -C /var/lib/docker/volumes/ansnew-cloud_data_volume storage-root && docker compose up -d` |
 | Stop / start | `docker compose down` / `docker compose up -d` |
 
 > **Never run `docker compose down -v`.** It deletes the `data_volume`, which
@@ -324,7 +321,7 @@ Fixes, in order of preference:
 4. **No registry access at all** — build where the network works and ship the tarball:
    ```bash
    # on a machine that CAN build
-   docker save ansnew/nginx ansnew/php ansnew/ws ansnew/nas | gzip > ansnew-images.tgz
+   docker save ansnew/nginx ansnew/php | gzip > ansnew-images.tgz
    # on the server
    docker load -i ansnew-images.tgz
    docker compose up -d --no-build --force-recreate
@@ -347,6 +344,6 @@ which removes one registry round-trip from every build. Base images
   WebDAV — the provider handles at-rest), file names/paths, the SQLite database,
   thumbnails, and `.env`.
 - The keys live in the `data_volume`; **losing them is unrecoverable**. Back them
-  up (step 4 / BACKUP-RESTORE.md).
+  up (step 4).
 - Full-disk/volume encryption on the host is the baseline that covers everything
   above and is **your** step — it cannot be done from inside the app.

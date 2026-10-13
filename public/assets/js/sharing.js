@@ -11,7 +11,6 @@ import { api, invalidate } from './api.js';
 import { state } from './state.js';
 import { icon } from './icons.js';
 import { dialog, confirmDialog, toastOk, toastErr } from './ui.js';
-import { ensureSensitive } from './sensitive.js';
 
 function baseUrl() {
   return window.location.origin + window.location.pathname.replace(/\/index\.php$/, '');
@@ -149,17 +148,14 @@ export async function renderSharesView(container, { onChanged }) {
     )));
   const tbody = el('tbody');
 
-  // One-click teardown of every link this user owns. Gated like "clear
-  // favourites": a bulk, irreversible action, so it asks for the password
-  // and then confirms before wiping the list.
+  // One-click teardown of every link this user owns: a bulk, irreversible
+  // action, so it confirms before wiping the list.
   const removeAll = el('button', { class: 'btn danger' }, icon('trash'), 'Remove all');
   removeAll.addEventListener('click', async () => {
     const ok = await confirmDialog(
       'Remove every share link you have created? Anyone holding one of these links will immediately lose access, and there is no undo.',
       { title: 'Remove all share links', danger: true, okLabel: 'Remove all' });
     if (!ok) return;
-    const granted = await ensureSensitive('shares.clear');
-    if (!granted) return;
     try {
       const r = await api.delete('/api/shares/all');
       invalidate('shares');

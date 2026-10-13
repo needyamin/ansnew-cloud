@@ -118,13 +118,22 @@ const folderPage = await (await fetch(`${BASE}/s/${encodeURIComponent(folderToke
 check('the shared folder lists its contents publicly', folderPage.includes(FILE), 'len=' + folderPage.length);
 check('the folder page does not leak files outside it', !folderPage.includes(PRIVATE));
 
-// Password protection.
+// Password protection. The password is submitted by POST (never in the URL);
+// a correct POST sets an access-grant cookie for the rest of the checks.
 r = await call('/api/shares', 'POST', { mount: 'local', path: `/${FOLDER}`, password: 'letmein' });
 const protToken = r.json?.data?.token;
 const noPw = await fetch(`${BASE}/s/${encodeURIComponent(protToken)}`);
 check('a password-protected link asks for the password', noPw.status === 401, 'status=' + noPw.status);
-const withPw = await fetch(`${BASE}/s/${encodeURIComponent(protToken)}?password=letmein`);
+const withPw = await fetch(`${BASE}/s/${encodeURIComponent(protToken)}`, {
+  method: 'POST',
+  body: new URLSearchParams({ password: 'letmein' }),
+});
 check('the right password opens it', withPw.status === 200, 'status=' + withPw.status);
+const wrongPw = await fetch(`${BASE}/s/${encodeURIComponent(protToken)}`, {
+  method: 'POST',
+  body: new URLSearchParams({ password: 'nope-nope' }),
+});
+check('the wrong password is refused', wrongPw.status === 401, 'status=' + wrongPw.status);
 
 // Expiry.
 r = await call('/api/shares', 'POST', { mount: 'local', path: `/${FOLDER}`, expiresDays: 900 });

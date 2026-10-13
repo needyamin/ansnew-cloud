@@ -107,15 +107,6 @@ export function setColumn(name, on) {
   try { localStorage.setItem('ansnew.col.' + name, state.cols[name] ? '1' : '0'); } catch (_) { /* quota */ }
 }
 
-/** Apply the gate posture published by /api/bootstrap. */
-export function setSensitivePolicy(p) {
-  if (!p || typeof p !== 'object') return;
-  state.sensitive = {
-    ttl: Number(p.ttl) || 60,
-    gateDeleteTrash: p.gateDeleteTrash !== false,
-  };
-}
-
 /* ------------------------------------------------------------- favourites */
 
 export function favoriteKey(mount, path) { return mount + ':' + path; }

@@ -7,18 +7,15 @@ namespace App\Storage;
 use App\Auth\AuthContext;
 use App\Config\Config;
 use App\Core\Database;
-use App\Storage\Adapters\FtpAdapter;
-use App\Storage\Adapters\HttpAdapter;
-use App\Storage\Adapters\S3Adapter;
 use App\Storage\Adapters\LocalAdapter;
-use App\Storage\Adapters\SftpAdapter;
-use App\Storage\Adapters\SmbAdapter;
+use App\Storage\Adapters\S3Adapter;
 use App\Support\PathGuard;
 use RuntimeException;
 
 /**
  * Resolves mounts for users and builds adapters.
  * This is the single place where user→mount authorization is decided.
+ * Local storage (encrypted at rest) + S3-compatible remotes.
  */
 final class StorageManager
 {
@@ -68,10 +65,6 @@ final class StorageManager
     {
         return match ($mount->adapter) {
             'local' => self::localAdapter($mount),
-            'ftp', 'ftps' => new FtpAdapter(ConnectionService::decryptForAdapter($mount), $mount->readOnly),
-            'sftp' => new SftpAdapter(ConnectionService::decryptForAdapter($mount), $mount->readOnly),
-            'smb' => new SmbAdapter(ConnectionService::decryptForAdapter($mount), $mount->readOnly),
-            'http' => new HttpAdapter(ConnectionService::decryptForAdapter($mount), $mount->readOnly),
             // S3 and every S3-compatible provider (R2, MinIO, Wasabi, B2, …).
             's3' => new S3Adapter(ConnectionService::decryptForAdapter($mount), $mount->readOnly),
             default => throw new RuntimeException('Unknown adapter: ' . $mount->adapter),
