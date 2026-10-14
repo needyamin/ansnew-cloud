@@ -198,12 +198,19 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .fitem.selected { background: var(--sel); border-color: var(--accent); }
 /* One fixed-height box for the type icon, so every tile
    is the same height and the row pitch is uniform. */
-.fitem .visual { width: 100%; height: 78px; display: grid; place-items: center; }
+.fitem .visual { width: 100%; height: 78px; display: grid; place-items: center; position: relative; }
 .fitem .visual .ico { width: 42px; height: 42px; }
-/* Image thumbnails (client-side, from /preview): fill the tile visual box or
-   sit where the row icon sits. object-fit keeps any aspect ratio inside. */
-.fitem .visual .thumb { grid-area: 1 / 1; width: 100%; height: 100%; object-fit: cover; border-radius: 8px; }
+/* Image thumbnails (client-side, from /preview): absolutely positioned inside
+   the fixed 78px visual box so EVERY tile shows the same thumbnail area —
+   object-fit: cover crops any aspect ratio to fit. (A plain img with
+   width/height 100% let the grid track stretch to the image's intrinsic
+   size, giving different tiles different heights.) */
+.fitem .visual .thumb { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 8px; }
 .frow .thumb { width: 18px; height: 18px; flex-shrink: 0; object-fit: cover; border-radius: 4px; }
+/* [hidden] must actually hide icons: svg.icon's display:inline-block otherwise
+   out-specifies the UA [hidden] rule (same fight as the fav-mark star), which
+   left the ghost type icon showing behind image thumbnails. */
+svg.icon[hidden] { display: none; }
 .fitem .nm { font-size: 12.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: break-all; }
 
 /* list rows */

@@ -38,6 +38,7 @@ final class Routes
         $r->post('/api/fs/{mount}/archive', fn($req, $m) => FsController::archive($req, $session, $m));
         $r->post('/api/fs/{mount}/extract', fn($req, $m) => FsController::extract($req, $session, $m));
         $r->get('/api/fs/{mount}/search', fn($req, $m) => FsController::search($req, $session, $m));
+        $r->get('/api/fs/{mount}/du', fn($req, $m) => FsController::du($req, $session, $m));
         $r->get('/api/fs/{mount}/download', fn($req, $m) => FsController::download($req, $session, $m));
         // Any mix of files and folders -> one zip, prepared by the worker.
         $r->post('/api/fs/{mount}/download-selection', fn($req, $m) => FsController::downloadSelection($req, $session, $m));

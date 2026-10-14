@@ -2280,7 +2280,8 @@ function goHistory(delta) {
   renderTabs();
 }
 
-/** Properties for one file or folder. */
+/** Properties for one file or folder. Folders measure their total contents
+ * size via /du (recursive) and fill the Size row when the walk finishes. */
 async function entryProperties(inst, entry) {
   let stat = entry;
   try {
@@ -2293,12 +2294,20 @@ async function entryProperties(inst, entry) {
     el('span', { class: 'prop-k muted', text: k }),
     el('span', { class: 'prop-v', text: v === null || v === undefined || v === '' ? '—' : String(v) }));
 
+  const isDir = entry.type === 'dir';
+  const sizeVal = el('span', {
+    class: 'prop-v' + (isDir ? ' muted' : ''),
+    text: isDir ? 'Calculating…' : fmtSize(stat.size ?? entry.size),
+  });
+  const sizeRow = el('div', { class: 'prop-row' },
+    el('span', { class: 'prop-k muted', text: 'Size' }), sizeVal);
+
   dialog({
     title: entry.name + ' Properties',
     body: [
       row('Name', entry.name),
-      row('Type', entry.type === 'dir' ? 'Folder' : (stat.mime || (entry.extension ? entry.extension.toUpperCase() + ' file' : 'File'))),
-      row('Size', entry.type === 'dir' ? '—' : fmtSize(stat.size ?? entry.size)),
+      row('Type', isDir ? 'Folder' : (stat.mime || (entry.extension ? entry.extension.toUpperCase() + ' file' : 'File'))),
+      sizeRow,
       row('Modified', fmtDate(stat.mtime ?? entry.mtime)),
       row('Location', `${inst.mountInfo?.label || inst.loc.mount}:${dirOf(entry.path)}`),
       row('Permissions', stat.mode || stat.perms || '—'),
@@ -2306,6 +2315,21 @@ async function entryProperties(inst, entry) {
     ],
     buttons: [{ label: 'Close' }],
   });
+
+  if (isDir) {
+    try {
+      const d = await api.get(
+        `/api/fs/${encodeURIComponent(inst.loc.mount)}/du?path=${encodeURIComponent(entry.path)}`,
+      );
+      const parts = [fmtSize(d?.used ?? 0)];
+      if (typeof d?.files === 'number') parts.push(`${d.files} file${d.files === 1 ? '' : 's'}`);
+      if (typeof d?.dirs === 'number') parts.push(`${d.dirs} folder${d.dirs === 1 ? '' : 's'}`);
+      sizeVal.textContent = parts.join(' · ');
+      sizeVal.classList.remove('muted');
+    } catch (e) {
+      sizeVal.textContent = 'Could not measure (' + (e && e.message ? e.message : 'error') + ')';
+    }
+  }
 }
 
 function globalKeys(e) {

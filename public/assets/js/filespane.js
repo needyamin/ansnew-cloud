@@ -729,18 +729,20 @@ export class FilesPane {
       thumb.hidden = true;
       thumb.removeAttribute('src');
       thumb.onerror = null;
-      ico.hidden = false;
+      // NB: SVGElement has no `.hidden` IDL property (that is HTMLElement
+      // only) — assigning it is a no-op expando. Use the attribute.
+      ico.removeAttribute('hidden');
       return;
     }
     if (thumb.dataset.path === entry.path && !thumb.hidden) return; // already showing
     thumb.dataset.path = entry.path;
     thumb.hidden = false;
-    ico.hidden = true;
+    ico.setAttribute('hidden', ''); // thumbnail replaces the type icon entirely
     thumb.onerror = () => { // broken/unsupported -> back to the type icon
       thumb.hidden = true;
       thumb.removeAttribute('src');
       thumb.dataset.path = '';
-      ico.hidden = false;
+      ico.removeAttribute('hidden');
     };
     thumb.src = `/api/fs/${encodeURIComponent(this.loc.mount)}/preview?path=${encodeURIComponent(entry.path)}`;
   }
@@ -754,7 +756,7 @@ export class FilesPane {
       t.removeAttribute('src');
       t.hidden = true;
       t.dataset.path = '';
-      if (node._refs.ico) node._refs.ico.hidden = false;
+      if (node._refs.ico) node._refs.ico.setAttribute('hidden', '');
     }
     node.classList.remove('selected', 'drop-target', 'dragging', 'pending', 'failed');
     node.removeAttribute('data-path');

@@ -586,6 +586,24 @@ final class FsController
     }
 
     /**
+     * GET /api/fs/{mount}/du?path= — total size of a folder's CONTENTS
+     * (recursive byte total + file/folder counts). This is what the
+     * Properties dialog shows as "Size" for folders. Walks the adapter, so
+     * remote drives pay a full listing; keep the dialog async while it runs.
+     */
+    public static function du(Request $req, SessionManager $session, string $mount): Response
+    {
+        $user = Guard::requireUser($session);
+        $path = (string) $req->query('path', '/');
+        [, $adapter, $norm] = StorageManager::resolve($user, Validator::mountName($mount), $path);
+        $stat = $adapter->stat($norm);
+        if (($stat['type'] ?? '') !== 'dir') {
+            return Response::error('Not a folder', 400, 'bad_request');
+        }
+        return Response::ok($adapter->du($norm));
+    }
+
+    /**
      * POST /api/fs/{mount}/download-selection
      * {"paths":["/a.txt","/docs"], "name":"my-files.zip"}
      *
