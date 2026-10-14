@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/needyamin/ansnew-cloud/main/assets/ansnew_cloud.jpg" alt="ANSNEW CLOUD logo" width="160">
+</p>
+
 # ANSNEW CLOUD
 
 A lightweight, self-hosted, desktop-style online file manager with **encryption at rest**.
