@@ -31,7 +31,7 @@ import { preview } from './preview.js';
 import { runUploadsWithUI } from './uploadtray.js';
 import { toastErr, toastOk } from './ui.js';
 import { onLongPress } from './gestures.js';
-import { FilterBar, matches } from './filters.js';
+import { FilterBar, matches, categoryOf } from './filters.js';
 
 const DRAG_MIME = 'application/x-ansnew';
 const SKELETON_ROWS = 8;
@@ -606,6 +606,9 @@ export class FilesPane {
 
   buildRowNode() {
     const ico = icon('file', 'ico');
+    // Image thumbnails: a small img swapped in place of the icon for image
+    // files (filled/cleared in fill()); blank otherwise.
+    const thumb = el('img', { class: 'thumb', alt: '', draggable: 'false', hidden: '' });
     const nm = el('span', { class: 'nm' });
     // Always-visible marker so favourite state is scannable without hovering.
     const favMark = icon('star', 'fav-mark');
@@ -613,18 +616,19 @@ export class FilesPane {
     const mt = el('span', { class: 'mt' });
     const ow = el('span', { class: 'ow' });
     const actions = this.buildRowActions();
-    const node = el('div', { class: 'frow', role: 'option', draggable: 'true' }, ico, nm, favMark, sz, mt, ow, actions);
-    node._refs = { ico, nm, favMark, sz, mt, ow, actions };
+    const node = el('div', { class: 'frow', role: 'option', draggable: 'true' }, thumb, ico, nm, favMark, sz, mt, ow, actions);
+    node._refs = { ico, thumb, nm, favMark, sz, mt, ow, actions };
     return node;
   }
 
   buildTileNode() {
     const ico = icon('file', 'ico');
-    const visual = el('div', { class: 'visual' }, ico);
+    const thumb = el('img', { class: 'thumb', alt: '', draggable: 'false', hidden: '' });
+    const visual = el('div', { class: 'visual' }, ico, thumb);
     const favMark = icon('star', 'fav-mark');
     const nm = el('div', { class: 'nm' });
     const node = el('div', { class: 'fitem', role: 'option', draggable: 'true' }, visual, favMark, nm);
-    node._refs = { visual, ico, favMark, nm };
+    node._refs = { visual, ico, thumb, favMark, nm };
     return node;
   }
 
@@ -684,15 +688,16 @@ export class FilesPane {
     this.applyFavMark(node, entry);
 
     if (tile) {
-      const { visual, ico, nm } = node._refs;
+      const { visual, ico, thumb, nm } = node._refs;
       nm.textContent = entry.name;
-      if (visual.firstChild !== ico) visual.replaceChildren(ico);
       setIcon(ico, iconFor(entry));
+      this.applyThumb(thumb, ico, entry);
       return;
     }
 
-    const { ico, nm, sz, mt, ow, actions } = node._refs;
+    const { ico, thumb, nm, sz, mt, ow, actions } = node._refs;
     setIcon(ico, iconFor(entry));
+    this.applyThumb(thumb, ico, entry);
     nm.textContent = entry.name;
     nm.title = entry.name;
     // Row cells follow the same toggles as the header cells; `sz`/`mt`/`ow` are
@@ -710,8 +715,47 @@ export class FilesPane {
     if (actions && actions._dl) actions._dl.hidden = entry.type === 'dir';
   }
 
+  /**
+   * Show an image thumbnail instead of the type icon for image files.
+   *
+   * Thumb sources are the same inline /preview endpoint the modal uses
+   * (credentials are same-origin by default). The pool reuses nodes, so the
+   * img is swapped per entry here; a failed load falls back to the icon, and
+   * releaseNode() clears the src so a pooled node stops loading.
+   */
+  applyThumb(thumb, ico, entry) {
+    const isImg = entry.type === 'file' && categoryOf(entry) === 'images';
+    if (!isImg) {
+      thumb.hidden = true;
+      thumb.removeAttribute('src');
+      thumb.onerror = null;
+      ico.hidden = false;
+      return;
+    }
+    if (thumb.dataset.path === entry.path && !thumb.hidden) return; // already showing
+    thumb.dataset.path = entry.path;
+    thumb.hidden = false;
+    ico.hidden = true;
+    thumb.onerror = () => { // broken/unsupported -> back to the type icon
+      thumb.hidden = true;
+      thumb.removeAttribute('src');
+      thumb.dataset.path = '';
+      ico.hidden = false;
+    };
+    thumb.src = `/api/fs/${encodeURIComponent(this.loc.mount)}/preview?path=${encodeURIComponent(entry.path)}`;
+  }
+
   /** Return a node to the pool. Must strip everything fill() sets. */
   releaseNode(node) {
+    // Stop any in-flight thumbnail load and reset the icon/thumb swap.
+    if (node._refs && node._refs.thumb) {
+      const t = node._refs.thumb;
+      t.onerror = null;
+      t.removeAttribute('src');
+      t.hidden = true;
+      t.dataset.path = '';
+      if (node._refs.ico) node._refs.ico.hidden = false;
+    }
     node.classList.remove('selected', 'drop-target', 'dragging', 'pending', 'failed');
     node.removeAttribute('data-path');
     node.removeAttribute('data-dir');

@@ -200,6 +200,10 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
    is the same height and the row pitch is uniform. */
 .fitem .visual { width: 100%; height: 78px; display: grid; place-items: center; }
 .fitem .visual .ico { width: 42px; height: 42px; }
+/* Image thumbnails (client-side, from /preview): fill the tile visual box or
+   sit where the row icon sits. object-fit keeps any aspect ratio inside. */
+.fitem .visual .thumb { grid-area: 1 / 1; width: 100%; height: 100%; object-fit: cover; border-radius: 8px; }
+.frow .thumb { width: 18px; height: 18px; flex-shrink: 0; object-fit: cover; border-radius: 4px; }
 .fitem .nm { font-size: 12.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: break-all; }
 
 /* list rows */
@@ -279,9 +283,12 @@ aside.details[hidden] { display: none; }
 
 /* ---------- favourites ---------- */
 /* A class, not [hidden]: `svg.icon` sets display:inline-block, which would beat
-   the UA [hidden] rule and leave the star visible on everything. */
-.fav-mark { display: none; color: var(--warn); width: 13px; height: 13px; margin-left: -4px; }
-.fav-mark.on { display: inline-block; }
+   the UA [hidden] rule and leave the star visible on everything.
+   svg.icon.fav-mark (0-2-1) out-specifies svg.icon (0-1-1) regardless of order —
+   a plain .fav-mark or svg.fav-mark ties/loses and the star showed on every
+   row, favourite or not. */
+svg.icon.fav-mark { display: none; color: var(--warn); width: 13px; height: 13px; margin-left: -4px; }
+svg.icon.fav-mark.on { display: inline-block; }
 .fitem .fav-mark { position: absolute; top: 6px; right: 6px; margin: 0; width: 15px; height: 15px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
 .fitem { position: relative; }
 /* The toggle reads as "on" without needing hover. */
@@ -446,8 +453,11 @@ aside.details[hidden] { display: none; }
   .preview-bar { gap: 6px; padding: 8px 10px; }
   .preview-bar .btn .lbl { display: none; }
 }
-.preview-body { flex: 1; min-height: 0; display: grid; place-items: center; overflow: auto; padding: 0 16px 16px; }
-.preview-body img { max-width: 100%; max-height: 100%; object-fit: contain; }
+/* Flex centering (not grid): a flex container with flex:1 + min-height:0 has a
+   DEFINITE height, so the image's max-height:100% actually constrains — a grid
+   row sizes to its content, which let huge images overflow and scroll. */
+.preview-body { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 0 16px 16px; }
+.preview-body img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
 .preview-body video, .preview-body audio { max-width: 100%; }
 .preview-body pre { background: var(--panel); color: var(--text); padding: 16px; border-radius: 8px; max-width: 100%; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-all; font-size: 13px; }
 .preview-body .md { background: var(--panel); padding: 20px 26px; border-radius: 8px; max-width: 860px; width: 100%; overflow-wrap: anywhere; }
