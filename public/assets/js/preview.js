@@ -16,6 +16,10 @@ const MD_EXT = new Set(['md', 'markdown']);
 // it still opens the modal (the server answers "unsupported" and we show a
 // friendly notice + download instead of a hex dump).
 const DOC_EXT = new Set(['docx', 'doc', 'odt', 'rtf']);
+// Archives and PDF never render inline: show the action card (open in a new
+// tab / download) instead of a hex dump or a PDF plugin that may not exist.
+const ARCHIVE_EXT = new Set(['zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz']);
+const OPEN_INSTEAD_EXT = new Set(['pdf', ...ARCHIVE_EXT]);
 
 /** Extension of an entry, from its extension field or its name. */
 function extOf(entry) {
@@ -99,6 +103,7 @@ function iconName(entry) {
   if (['mp4', 'webm', 'mkv', 'mov'].includes(e)) return 'video';
   if (['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(e)) return 'audio';
   if (e === 'pdf') return 'pdf';
+  if (ARCHIVE_EXT.has(e)) return 'archive';
   if (MD_EXT.has(e)) return 'code';
   if (DOC_EXT.has(e)) return 'file';
   if (TEXT_EXT.has(e)) return 'code';
@@ -109,6 +114,25 @@ async function renderInto(body, entry, mount, path, url, downloadUrl) {
   const e = extOf(entry);
   const mime = entry.mime || '';
   clear(body);
+
+  // Archives + PDF: no inline render. Show a clear card with both actions —
+  // open the raw bytes in a new tab, or download — rather than a hex dump or
+  // a PDF object plugin that embedded webviews often lack.
+  if (OPEN_INSTEAD_EXT.has(e) || mime === 'application/pdf') {
+    const card = el('div', { class: 'preview-notice' },
+      el('p', { class: 'notice-title', text: 'No inline preview for this file type' }),
+      el('p', { class: 'muted', text: entry.name + ' (' + fmtSize(entry.size) + ')' }),
+      el('p', { class: 'muted', text: 'Open it in a new tab or download it to your device.' }),
+      el('div', { class: 'notice-actions' },
+        el('a', { class: 'btn primary', href: url, target: '_blank', rel: 'noopener' },
+          icon('ext', ''), el('span', { class: 'lbl', text: 'Open in new tab' })),
+        el('a', { class: 'btn', href: downloadUrl, download: entry.name },
+          icon('download', ''), el('span', { class: 'lbl', text: 'Download' })),
+      ),
+    );
+    body.appendChild(card);
+    return;
+  }
 
   // Markdown / markup -> rendered HTML (safe subset, escaped).
   if (MD_EXT.has(e)) {
@@ -154,15 +178,6 @@ async function renderInto(body, entry, mount, path, url, downloadUrl) {
     const player = buildMediaPlayer({ url, downloadUrl, isAudio, title: entry.name });
     body.appendChild(player.node);
     return player.destroy;
-  }
-  if (e === 'pdf' || mime === 'application/pdf') {
-    const obj = el('object', { type: 'application/pdf', data: url });
-    body.appendChild(obj);
-    // Some embedded webviews have no PDF plugin; keep a quiet escape hatch.
-    body.appendChild(el('div', { class: 'preview-hint muted' },
-      'If the document does not appear, ',
-      el('a', { href: url, target: '_blank', rel: 'noopener', text: 'open it in a new tab' }), '.'));
-    return;
   }
   // hex fallback (first 4 KiB) — also what a text file lands on when the server
   // sniffs binary content in it (see openEditor in editor.js).

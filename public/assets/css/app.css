@@ -432,8 +432,20 @@ aside.details[hidden] { display: none; }
 
 /* ---------- preview ---------- */
 .preview-overlay { position: fixed; inset: 0; z-index: 950; background: rgba(0,0,0,.82); display: flex; flex-direction: column; }
-.preview-bar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; color: #eee; }
-.preview-bar .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-bar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; color: #eee; min-width: 0; }
+.preview-bar .name { font-weight: 600; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Action buttons never shrink away: a long filename compresses the name, never
+   the Download / Close buttons (they used to disappear on narrow windows).
+   The overlay behind is dark, so these buttons carry their OWN colors —
+   without them .btn would inherit the bar's #eee text on a light background
+   and become unreadable. */
+.preview-bar .btn { flex: 0 0 auto; background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.3); color: #fff; }
+.preview-bar .btn:hover { background: rgba(255,255,255,.24); border-color: rgba(255,255,255,.45); }
+.preview-bar .btn .lbl { white-space: nowrap; }
+@media (max-width: 560px) {
+  .preview-bar { gap: 6px; padding: 8px 10px; }
+  .preview-bar .btn .lbl { display: none; }
+}
 .preview-body { flex: 1; min-height: 0; display: grid; place-items: center; overflow: auto; padding: 0 16px 16px; }
 .preview-body img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .preview-body video, .preview-body audio { max-width: 100%; }
@@ -464,6 +476,20 @@ aside.details[hidden] { display: none; }
 .preview-body .md th { background: var(--bg3); }
 .preview-body .md img { max-width: 100%; }
 .preview-body .preview-hint { margin-top: 8px; font-size: 12px; }
+/* "Open in new tab / Download" card for types with no inline preview
+   (archives, PDF): a centered panel with both actions as real buttons. */
+.preview-body .preview-notice {
+  background: var(--panel); color: var(--text);
+  padding: 28px 34px; border-radius: 10px; max-width: 460px; width: 100%;
+  text-align: center; border: 1px solid var(--border);
+}
+.preview-body .preview-notice .notice-title { font-weight: 600; font-size: 1.05em; margin: 0 0 6px; }
+.preview-body .preview-notice p { margin: .3em 0; overflow-wrap: anywhere; }
+.preview-body .preview-notice .notice-actions {
+  display: flex; gap: 10px; justify-content: center; margin-top: 16px; flex-wrap: wrap;
+}
+.preview-body .preview-notice .notice-actions .btn { text-decoration: none; color: var(--text); }
+.preview-body .preview-notice .notice-actions .btn.primary { color: #fff; }
 
 /* ---------- built-in code editor (text files) ---------- */
 /* Fills the viewport: this is a workspace, not a modal, and it must not be
