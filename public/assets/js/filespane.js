@@ -1302,8 +1302,15 @@ export class FilesPane {
   open(entry) {
     // Let the shell note this in Recent before we navigate away.
     if (this.onOpenEntry) this.onOpenEntry(this, entry);
-    if (entry.type === 'dir') this.navigate(this.loc.mount, entry.path);
-    else preview(entry, this.loc.mount);
+    if (entry.type === 'dir') { this.navigate(this.loc.mount, entry.path); return; }
+    // Images open as a slider: every image in this folder, so the preview's
+    // arrow keys / buttons can flip through them without closing.
+    let gallery = null;
+    if (categoryOf(entry) === 'images') {
+      gallery = this.entries.filter(e => e.type === 'file' && categoryOf(e) === 'images');
+      if (gallery.length < 2) gallery = null;
+    }
+    preview(entry, this.loc.mount, gallery);
   }
 
   goUp() {

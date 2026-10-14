@@ -9,6 +9,7 @@
 import { el, clear, fmtSize, fmtDate } from './util.js';
 import { icon, iconFor } from './icons.js';
 import { isFavorite } from './state.js';
+import { api } from './api.js';
 
 export class DetailsPanel {
   /**
@@ -37,21 +38,34 @@ export class DetailsPanel {
       return;
     }
 
+    // Needed by BOTH branches (folder measuring) — declare before either runs.
+    const mount = pane ? pane.loc.mount : '';
+
     if (entries.length > 1) {
-      const total = entries.reduce((n, e) => n + (e.size || 0), 0);
-      const dirs = entries.filter(e => e.type === 'dir').length;
+      const dirs = entries.filter(e => e.type === 'dir');
+      // Folder contents are not in the listing entry's `size`, so the first
+      // figure covers plain files only; folder walks fill the rest in.
+      const fileTotal = entries.reduce((n, e) => n + (e.type === 'dir' ? 0 : (e.size || 0)), 0);
       this.body.appendChild(el('div', { class: 'details-title', text: `${entries.length} items selected` }));
-      this.body.appendChild(this.rows([
-        ['Folders', String(dirs)],
-        ['Files', String(entries.length - dirs)],
-        ['Total size', fmtSize(total)],
-      ]));
+      const list = this.rows([
+        ['Folders', String(dirs.length)],
+        ['Files', String(entries.length - dirs.length)],
+        ['Total size', fmtSize(fileTotal) + (dirs.length ? ' + folders…' : '')],
+      ]);
+      this.body.appendChild(list);
+      if (dirs.length) {
+        // Measure every selected folder's contents (capped) and update in place.
+        const dd = list.children[5]; // 3rd pair's <dd>
+        dd.textContent = 'Calculating…';
+        this.measureFolders(dirs.slice(0, 10), mount).then((sum) => {
+          dd.textContent = fmtSize(fileTotal + sum) + (dirs.length > 10 ? ' (first 10 folders)' : '');
+        }).catch(() => { dd.textContent = fmtSize(fileTotal) + ' + folders'; });
+      }
       this.body.appendChild(this.actions(entries, pane, true));
       return;
     }
 
     const e = entries[0];
-    const mount = pane ? pane.loc.mount : '';
     const head = el('div', { class: 'details-head' });
 
     head.appendChild(icon(iconFor(e), 'details-ico'));
@@ -59,8 +73,8 @@ export class DetailsPanel {
     head.appendChild(el('div', { class: 'muted', text: e.type === 'dir' ? 'Folder' : (e.mime || 'File') }));
     this.body.appendChild(head);
 
-    this.body.appendChild(this.rows([
-      ['Size', e.type === 'dir' ? '—' : fmtSize(e.size)],
+    const list = this.rows([
+      ['Size', e.type === 'dir' ? 'Calculating…' : fmtSize(e.size)],
       ['Modified', fmtDate(e.mtime)],
       ['Type', e.extension ? String(e.extension).toUpperCase() : (e.type === 'dir' ? 'Folder' : '—')],
       ['MIME', e.mime || '—'],
@@ -68,9 +82,35 @@ export class DetailsPanel {
       ['Owner', [e.owner, e.group].filter(Boolean).join(':') || '—'],
       ['Mount', mount],
       ['Path', e.path],
-    ]));
+    ]);
+    this.body.appendChild(list);
+
+    // A folder's listing entry has no meaningful size: measure its contents
+    // recursively (same source as the Properties dialog) and fill the row in.
+    if (e.type === 'dir' && mount) {
+      const dd = list.children[1]; // first pair's <dd>
+      api.get(`/api/fs/${encodeURIComponent(mount)}/du?path=${encodeURIComponent(e.path)}`)
+        .then((d) => {
+          if (!d || typeof d.used !== 'number') throw new Error('no data');
+          dd.textContent = fmtSize(d.used) + (typeof d.files === 'number' ? ` · ${d.files} file${d.files === 1 ? '' : 's'}` : '');
+        })
+        .catch(() => { dd.textContent = '—'; });
+    }
 
     this.body.appendChild(this.actions([e], pane, false));
+  }
+
+  /** Sum the recursive size of the given folder entries (best effort). */
+  async measureFolders(dirs, mount) {
+    let sum = 0;
+    for (const d of dirs) {
+      try {
+        const r = await api.get(
+          `/api/fs/${encodeURIComponent(mount)}/du?path=${encodeURIComponent(d.path)}`);
+        if (r && typeof r.used === 'number') sum += r.used;
+      } catch (_) { /* skip unmeasurable folders */ }
+    }
+    return sum;
   }
 
   rows(pairs) {

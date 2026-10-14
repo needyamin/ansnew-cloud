@@ -456,6 +456,12 @@ svg.icon.fav-mark.on { display: inline-block; }
 .preview-bar .btn { flex: 0 0 auto; background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.3); color: #fff; }
 .preview-bar .btn:hover { background: rgba(255,255,255,.24); border-color: rgba(255,255,255,.45); }
 .preview-bar .btn .lbl { white-space: nowrap; }
+/* Image slider chrome: counter + prev/next arrows in the preview bar. */
+.preview-counter { flex: 0 0 auto; font-size: 12px; color: rgba(255,255,255,.85); font-variant-numeric: tabular-nums; min-width: 44px; text-align: center; }
+.preview-bar .btn.preview-nav { padding: 6px 8px; }
+.preview-bar .btn.preview-nav svg.icon { width: 16px; height: 16px; }
+svg.icon.rot90 { transform: rotate(-90deg); }
+svg.icon.rot270 { transform: rotate(90deg); }
 @media (max-width: 560px) {
   .preview-bar { gap: 6px; padding: 8px 10px; }
   .preview-bar .btn .lbl { display: none; }

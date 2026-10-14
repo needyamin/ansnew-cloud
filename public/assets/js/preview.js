@@ -36,7 +36,7 @@ export function hasRichPreview(entry) {
   return MD_EXT.has(e) || DOC_EXT.has(e);
 }
 
-export function preview(entry, mount) {
+export function preview(entry, mount, gallery) {
   // Markdown + office documents get a rendered view (Google-Drive style)
   // rather than the raw editor or a hex dump.
   if (hasRichPreview(entry)) { previewBytes(entry, mount); return; }
@@ -56,45 +56,93 @@ export function preview(entry, mount) {
       });
     return;
   }
-  previewBytes(entry, mount);
+  previewBytes(entry, mount, gallery);
 }
 
-function previewBytes(entry, mount) {
+function previewUrl(mount, path) {
+  return `/api/fs/${encodeURIComponent(mount)}/preview?path=${encodeURIComponent(path)}`;
+}
+
+function previewBytes(entry, mount, gallery) {
+  // Image slider: when the caller passes a list of sibling images (2+), the
+  // preview becomes navigable — prev/next arrows, arrow keys, wrap-around.
+  const list = Array.isArray(gallery) && gallery.length > 1 ? gallery.slice() : null;
+  let idx = list ? Math.max(0, list.findIndex((g) => g.path === entry.path)) : 0;
+
   const path = entry.path || entry.name;
-  const url = `/api/fs/${encodeURIComponent(mount)}/preview?path=${encodeURIComponent(path)}`;
+  let url = previewUrl(mount, path);
   const downloadUrl = `/api/fs/${encodeURIComponent(mount)}/download?path=${encodeURIComponent(path)}`;
   let cleanup = null;
+  let nameEl = null, sizeEl = null, dlLink = null;
 
   const bar = el('div', { class: 'preview-bar' },
     icon(iconName(entry), ''),
-    el('span', { class: 'name', text: entry.name }),
-    el('span', { class: 'muted', text: fmtSize(entry.size) }),
+    nameEl = el('span', { class: 'name', text: entry.name }),
+    sizeEl = el('span', { class: 'muted', text: fmtSize(entry.size) }),
     el('span', { style: 'flex:1' }),
     // A rendered preview of an editable file keeps a one-click route to editing.
     isTextEntry(entry)
       ? el('button', { class: 'btn', title: 'Edit in the code editor', onclick: () => { close(); openEditor(entry, mount); } },
           icon('edit', ''), el('span', { class: 'lbl', text: 'Edit' }))
       : null,
-    el('a', { class: 'btn icon', href: downloadUrl, download: entry.name, title: 'Download', 'aria-label': 'Download' }, icon('download')),
-    el('button', { class: 'btn', text: 'Close (Esc)', onclick: () => close() }),
   );
+  // Slider chrome (counter + arrows) sits right before the download link.
+  if (list) {
+    bar.appendChild(el('span', { class: 'preview-counter', text: (idx + 1) + ' / ' + list.length }));
+    bar.appendChild(el('button', {
+      class: 'btn preview-nav prev', title: 'Previous image (←)', 'aria-label': 'Previous image',
+      onclick: () => show(idx - 1),
+    }, icon('up', 'rot90')));
+    bar.appendChild(el('button', {
+      class: 'btn preview-nav next', title: 'Next image (→)', 'aria-label': 'Next image',
+      onclick: () => show(idx + 1),
+    }, icon('up', 'rot270')));
+  }
+  dlLink = el('a', { class: 'btn icon', href: downloadUrl, download: entry.name, title: 'Download', 'aria-label': 'Download' }, icon('download'));
+  bar.appendChild(dlLink);
+  bar.appendChild(el('button', { class: 'btn', text: 'Close (Esc)', onclick: () => close() }));
+
   const body = el('div', { class: 'preview-body' }, el('span', { class: 'muted spin', text: 'Loading…' }));
   const ov = el('div', { class: 'preview-overlay' }, bar, body);
+
+  function renderCurrent() {
+    const cur = list ? list[idx] : entry;
+    const p = cur.path || cur.name;
+    url = previewUrl(mount, p);
+    if (nameEl) nameEl.textContent = cur.name || p;
+    if (sizeEl) sizeEl.textContent = fmtSize(cur.size);
+    if (dlLink) { dlLink.href = `/api/fs/${encodeURIComponent(mount)}/download?path=${encodeURIComponent(p)}`; dlLink.setAttribute('download', cur.name || p); }
+    const counter = bar.querySelector('.preview-counter');
+    if (counter) counter.textContent = (idx + 1) + ' / ' + list.length;
+    if (cleanup) { try { cleanup(); } catch (_) {} cleanup = null; }
+    Promise.resolve(renderInto(body, cur, mount, p, url, dlLink.href))
+      .then((fn) => { cleanup = typeof fn === 'function' ? fn : null; })
+      .catch(err => {
+        clear(body);
+        body.appendChild(el('div', { class: 'muted', text: 'Preview unavailable: ' + (err && err.message ? err.message : 'unknown error') }));
+      });
+  }
+
+  function show(i) {
+    if (!list) return;
+    idx = ((i % list.length) + list.length) % list.length; // wrap around
+    renderCurrent();
+  }
+
   function close() {
     document.removeEventListener('keydown', onKey);
     if (cleanup) { try { cleanup(); } catch (_) {} cleanup = null; }
     ov.remove();
   }
-  function onKey(e) { if (e.key === 'Escape') close(); }
+  function onKey(e) {
+    if (e.key === 'Escape') close();
+    else if (list && e.key === 'ArrowLeft') show(idx - 1);
+    else if (list && e.key === 'ArrowRight') show(idx + 1);
+  }
   document.addEventListener('keydown', onKey);
   document.body.appendChild(ov);
 
-  Promise.resolve(renderInto(body, entry, mount, path, url, downloadUrl))
-    .then((fn) => { cleanup = typeof fn === 'function' ? fn : null; })
-    .catch(err => {
-      clear(body);
-      body.appendChild(el('div', { class: 'muted', text: 'Preview unavailable: ' + (err && err.message ? err.message : 'unknown error') }));
-    });
+  renderCurrent();
 }
 
 function iconName(entry) {
