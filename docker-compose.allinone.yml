@@ -1,0 +1,85 @@
+name: ansnew-cloud
+
+# =============================================================================
+#  ANSNEW CLOUD — ALL-IN-ONE deployment: ONE image, pulled, never built.
+# =============================================================================
+#
+#  Everything (nginx + php-fpm + job worker + SQLite) runs in a single
+#  container, so there is exactly one image to pull and nothing to build:
+#
+#      docker compose -f docker-compose.allinone.yml up -d
+#
+#  ...or skip Compose entirely (see the README "one command" section):
+#
+#      docker run -d --name ansnew -p 8080:8080 \
+#          -v ansnew-data:/var/www/data -v ansnew-storage:/srv/storage \
+#          <registry>/ansnew-cloud:latest
+#
+#  The classic split deployment (separate nginx / php / worker containers with
+#  per-service isolation and resource caps) remains available through
+#  docker-compose.yml. Both files share the SAME volume names under the same
+#  project name, so data (SQLite DB, encryption keys, files) carries over when
+#  you switch modes — and the identical port mappings make it impossible to
+#  run both stacks at the same time by accident.
+#
+#  Point ANSNEW_IMAGE (or .env) at a registry image for the pull-only path:
+#      ANSNEW_IMAGE=youruser/ansnew-cloud:latest
+# =============================================================================
+
+# Shared log rotation. Without this the Docker json-file driver grows without
+# bound — the app also writes its own log inside the data volume, so both need
+# a cap. See docs/DEPLOY.md.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  ansnew:
+    # Fixed container name — this is what the ./ansnew console wrapper execs
+    # into when the split stack isn't running (see ./ansnew, ANSNEW_CONTAINER).
+    container_name: ansnew
+    image: ${ANSNEW_IMAGE:-ansnew/cloud:allinone}
+    ports:
+      # The app itself. Published for a local/dev instance; in production keep
+      # it closed in the firewall (only 80/443 should be reachable).
+      - "${HTTP_PORT:-8080}:8080"
+      # Public HTTP: serves the ACME challenge and 301-redirects to HTTPS.
+      - "${PUBLIC_HTTP_PORT:-80}:8082"
+      # Public HTTPS (TLS terminated by nginx inside the same container).
+      - "${HTTPS_PORT:-443}:8443"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # SQLite DB, encryption keys, sessions, tmp, trash, app log.
+      - data_volume:/var/www/data
+      # Encrypted file storage.
+      - storage_volume:/srv/storage
+      # Default local mount (host directory bound into the storage root).
+      - ${STORAGE_HOST_PATH:-./storage-root}:/srv/storage/local
+      # TLS material, kept OUTSIDE the project (and outside OneDrive) so the
+      # private key is never cloud-synced. Read-only on purpose; when absent a
+      # self-signed placeholder is minted at boot so the container always
+      # starts. See scripts/make-cert.sh.
+      - ${CERTS_HOST_PATH:-./certs}:/etc/nginx/certs:ro
+      # certbot's HTTP-01 challenge directory (read-only into nginx).
+      - ${ACME_WEBROOT_HOST_PATH:-./acme-webroot}:/var/www/acme:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+    restart: unless-stopped
+    logging: *default-logging
+    # Combined budget of the three services in the split deployment
+    # (256m nginx + 2g php + 2g worker), with headroom.
+    mem_limit: 4g
+    cpus: "3.0"
+    pids_limit: 768
+
+volumes:
+  data_volume:
+  storage_volume:

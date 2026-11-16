@@ -8,8 +8,16 @@
 #     docker compose exec php php /var/www/app/bin/console.php ansnew:crypto-status
 #
 # becomes  php C:/Program Files/Git/var/www/app/bin/console.php  before Docker
-# ever sees it, and you get "Could not open input file". The image's WORKDIR is
-# /var/www/app, so a relative path avoids the rewrite entirely.
+# ever sees it, and you get "Could not open input file". Both runtimes set the
+# image's WORKDIR to /var/www/app, so a relative path avoids the rewrite
+# entirely.
+#
+# Works with BOTH deployment modes, detected automatically:
+#   1. the split stack (docker-compose.yml)         -> docker compose exec php ...
+#   2. the all-in-one container (docker-compose.allinone.yml, or a bare
+#      `docker run --name ansnew ...`)              -> docker exec ansnew ...
+# The all-in-one container name defaults to "ansnew"; override with
+# ANSNEW_CONTAINER=<name>.
 #
 # Usage:
 #   ./ansnew                       # list commands
@@ -22,22 +30,34 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if ! docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -qx php; then
-    echo "ansnew: the 'php' service is not running. Start it with: docker compose up -d" >&2
-    exit 1
+# Resolve which runtime to exec into: the split stack first, then the
+# all-in-one container.
+if docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -qx php; then
+    CONSOLE=(docker compose exec php php)
+else
+    container="${ANSNEW_CONTAINER:-ansnew}"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$container"; then
+        CONSOLE=(docker exec "$container" php)
+    else
+        echo "ansnew: neither the split stack nor the all-in-one container '${container}' is running." >&2
+        echo "  Start one with:" >&2
+        echo "    docker compose up -d" >&2
+        echo "    docker run -d --name ansnew -p 8080:8080 <registry>/ansnew-cloud:latest" >&2
+        exit 1
+    fi
 fi
 
 # No command, or a help flag: show the command list.
 case "${1:-}" in
     ""|help|--help|-h)
-        exec docker compose exec php php bin/console.php
+        exec "${CONSOLE[@]}" bin/console.php
         ;;
 esac
 
 # Accept the short form too: `./ansnew migrate` -> `ansnew:migrate`.
 if [[ "$1" == *:* ]]; then
-    exec docker compose exec php php bin/console.php "$@"
+    exec "${CONSOLE[@]}" bin/console.php "$@"
 fi
 
 first="$1"; shift
-exec docker compose exec php php bin/console.php "ansnew:${first}" "$@"
+exec "${CONSOLE[@]}" bin/console.php "ansnew:${first}" "$@"

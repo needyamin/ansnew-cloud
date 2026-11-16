@@ -89,6 +89,49 @@ TRUST_PROXY=true
 `APP_KEY` and `data/keys/file.key` are generated on first boot.
 **Back them up** (see the snapshot command under "Common operations").
 
+### Option C — single image, no checkout
+
+One image (nginx + php-fpm + worker + SQLite in a single container, supervised
+by supervisord) pulled from the registry — no git clone, no build. This is the
+"one command" quickstart from the README:
+
+```bash
+docker run -d --name ansnew -p 8080:8080 -p 80:8082 -p 443:8443 \
+  -v ansnew-data:/var/www/data -v ansnew-storage:/srv/storage \
+  -v /etc/ansnew/tls:/etc/nginx/certs:ro -v /var/www/ansnew-acme:/var/www/acme:ro \
+  -e APP_URL=https://cloud.example.com -e SESSION_SECURE_COOKIE=true \
+  -v /srv/ansnew:/srv/storage/local \
+  needyamin/ansnew-cloud:latest
+```
+
+Or via Compose, still pull-only (`docker-compose.allinone.yml` maps the same
+volume and port variables as the split file; put `ANSNEW_IMAGE=<repo>:latest`
+in `.env`):
+
+```bash
+docker compose -f docker-compose.allinone.yml up -d
+```
+
+Mode-specific notes:
+
+- Everything runs as www-data under supervisord inside ONE container.
+  `docker exec ansnew supervisorctl status` lists the three processes; the
+  console is `docker exec ansnew php bin/console.php …` (the `./ansnew`
+  wrapper auto-detects this mode). Logs land in one stream:
+  `docker logs ansnew`.
+- TLS: point `CERTS_HOST_PATH` at the same `/etc/ansnew/tls` directory as the
+  split deployment and issue the certificate with
+  `./scripts/init-letsencrypt.sh` — it detects the running stack and restarts
+  the `ansnew` service instead of `nginx`. Without any certificate the
+  container mints a self-signed placeholder at boot, so it always starts.
+- Upgrades: `docker pull <repo>:latest`, then `docker stop ansnew && docker rm
+  ansnew` and re-run the same `docker run` line — the volumes carry the DB,
+  keys and files. (In the Compose variant: `pull` + `up -d --force-recreate`,
+  same flags as below.)
+- Both compose files share the project name and volume names, so data carries
+  over when switching between this mode and the split deployment — and the
+  identical port mappings make running both at the same time impossible.
+
 ---
 
 ## 5. First boot
@@ -198,44 +241,43 @@ so an upgrade never drops data. Keep the pre-upgrade snapshot anyway — it is
 your rollback, and it is the only copy of `data/keys/` if the volume is ever
 lost.
 
-### Upgrading from published images
+### Upgrading the single-image deployment
 
-If you deploy pre-built images instead of building on the server (see
-[Docker images](../README.md#docker-images)), set the image references in `.env`
-and pull:
+Docker Hub publishes the all-in-one image only (`<repo>:latest` / `:allinone` /
+`:allinone-<version>`); there are no component images to pull:
 
 ```bash
 # (snapshot as above)
-# bump the tags in .env, then:
-docker compose pull
-docker compose up -d --no-build --force-recreate
-docker compose ps
+docker pull needyamin/ansnew-cloud:latest
+docker stop ansnew && docker rm ansnew
+# re-run the same `docker run` line — the volumes carry the DB, keys and files
 ```
 
-Two flags, both required, and both easy to lose:
+In the Compose variant of that mode (`docker-compose.allinone.yml`):
 
-- `--no-build` — the services also declare a `build:` context, so without it
-  Compose rebuilds locally and ignores what you just pulled.
-- `--force-recreate` — **without this the running container keeps the OLD
-  image.** Compose decides whether to recreate a container by hashing its
-  config, and an unchanged tag *string* hashes the same even when that tag now
-  points at a completely different image. `pull` updates the tag; only
-  `--force-recreate` makes the container actually use it.
+```bash
+docker compose -f docker-compose.allinone.yml pull
+docker compose -f docker-compose.allinone.yml up -d --force-recreate
+```
 
-> **The `IMAGE_*` defaults are local-only names.** `.env.example` ships
-> `IMAGE_PHP=ansnew/php` etc., which is what `docker compose build` produces
-> locally — those names do not exist on Docker Hub, so `docker compose pull`
-> fails with `pull access denied for ansnew/php, repository does not exist`
-> and downloads nothing. To upgrade from the registry you MUST point them at
-> the published repository, e.g. `IMAGE_PHP=needyamin/ansnew-cloud:php-1.0.0`.
-> On the server also run `docker login` first.
+`--force-recreate` is required: Compose decides whether to recreate a container
+by hashing its config, and an unchanged tag *string* hashes the same even when
+that tag now points at a completely different image. `pull` updates the tag;
+only `--force-recreate` makes the container actually use it.
+
+The split deployment has no published component images — it upgrades by
+building in place (runbook above). If you publish component tags to **your
+own** registry, point `IMAGE_NGINX` / `IMAGE_PHP` at it, then
+`docker compose pull && docker compose up -d --no-build --force-recreate`
+(`--no-build` matters too: the services also declare a `build:` context, so
+without it Compose rebuilds locally and ignores what you just pulled).
 
 Verify the running container really got the new image — the image ID in
 `docker compose ps` must match `docker images` for the pulled tag:
 
 ```bash
-docker compose images          # repo tag per service
-docker inspect -f '{{.Image}}' ansnew-cloud-php-1
+docker compose -f docker-compose.allinone.yml images   # image per service
+docker inspect -f '{{.Image}}' ansnew
 ```
 
 ### Rollback

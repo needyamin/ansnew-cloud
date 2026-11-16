@@ -48,11 +48,18 @@ node_modules/
 ws-server/node_modules/
 ws-server/npm-debug.log*
 
+# Local Compose overrides (port/flag experiments on a dev machine must never
+# silently change what a deploy from the checkout runs).
+docker-compose.override.yml
+
 # --- editor / OS --------------------------------------------------------
 .idea/
 .vscode/
 *.swp
 .DS_Store
+Thumbs.db
+Desktop.ini
 
-# --- local AI workspace state (memory, session logs) -------------------
+# --- local AI tooling workspace state (session logs, hook state, scan ledgers)
 .workbuddy-ai/
+.mimosa/

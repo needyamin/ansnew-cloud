@@ -53,7 +53,9 @@ certbot certonly "${ARGS[@]}"
 LIVE="/etc/letsencrypt/live/${DOMAIN}"
 install -m 0644 "$LIVE/fullchain.pem" "$CERTS/tls.crt"
 # Group 101 = nginx-unprivileged uid: the key must be readable inside the
-# read-only mounted certs directory or nginx cannot start.
+# read-only mounted certs directory or nginx cannot start. The all-in-one
+# image's www-data is a supplementary member of this same group for the same
+# reason (docker/allinone/Dockerfile).
 install -o root -g 101 -m 0640 "$LIVE/privkey.pem"   "$CERTS/tls.key"
 
 # RESTART, not reload. nginx cannot change ssl_certificate at runtime, and a
@@ -61,7 +63,15 @@ install -o root -g 101 -m 0640 "$LIVE/privkey.pem"   "$CERTS/tls.key"
 # generated placeholder (docker/nginx/40-ansnew-tls.sh) — reloading would keep
 # serving that placeholder forever. Restarting re-runs the startup script, which
 # now finds the real certificate and switches to it. Costs about a second, once.
-docker compose restart nginx
+#
+# Works against whichever stack is running: both compose files share the project
+# name, so `docker compose ps` lists the split deployment's nginx service or the
+# all-in-one stack's single ansnew service.
+if docker compose ps --format '{{.Service}}' 2>/dev/null | grep -qx ansnew; then
+  docker compose restart ansnew
+else
+  docker compose restart nginx
+fi
 
 echo "[ansnew] certificate installed for ${DOMAIN} and nginx restarted"
 echo "[ansnew] add the nightly renewal job (cron or systemd timer):"

@@ -256,7 +256,14 @@ function bootstrapAdmin(bool $force): void
     }
 
     try {
-        UserService::create($username, $credential, 'admin', 'Administrator', $config->get('ADMIN_EMAIL', ''), !$explicit);
+        // Policy enforcement mirrors the intent documented above: an explicit
+        // ADMIN_PASSWORD is validated against the policy, while the built-in
+        // weak 'admin' default bypasses it because must_change_pw (set below)
+        // forces a change at first sign-in. Passing !$explicit here used to
+        // invert that — the out-of-the-box boot then failed its own policy
+        // check ("Password must be at least 10 characters") and no admin was
+        // created at all.
+        UserService::create($username, $credential, 'admin', 'Administrator', $config->get('ADMIN_EMAIL', ''), $explicit);
     } catch (\InvalidArgumentException $e) {
         if (!$force) {
             fwrite(STDERR, "[ansnew] ADMIN_PASSWORD rejected by the password policy: {$e->getMessage()}\n");
